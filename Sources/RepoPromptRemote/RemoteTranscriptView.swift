@@ -686,6 +686,8 @@ struct RemoteSelectableText: UIViewRepresentable {
     let content: NSAttributedString
     var wraps = true
 
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
         view.backgroundColor = .clear
@@ -696,6 +698,11 @@ struct RemoteSelectableText: UIViewRepresentable {
         view.textContainer.lineFragmentPadding = 0
         view.linkTextAttributes = [.foregroundColor: UIColor.link, .underlineStyle: NSUnderlineStyle.single.rawValue]
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let paragraphTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.selectParagraph(_:)))
+        paragraphTap.numberOfTapsRequired = 3
+        paragraphTap.delegate = context.coordinator
+        view.addGestureRecognizer(paragraphTap)
         return view
     }
 
@@ -723,6 +730,42 @@ struct RemoteSelectableText: UIViewRepresentable {
         let width = max(1, min(widthLimit, ceil(bounds.width) + 1))
         let size = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
         return CGSize(width: width, height: ceil(size.height))
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            guard let otherTap = otherGestureRecognizer as? UITapGestureRecognizer else { return false }
+            return otherTap.view === gestureRecognizer.view && otherTap.numberOfTapsRequired == 2
+        }
+
+        @objc func selectParagraph(_ gesture: UITapGestureRecognizer) {
+            guard let view = gesture.view as? UITextView else { return }
+            let point = gesture.location(in: view)
+            guard let position = view.closestPosition(to: point),
+                  let range = RemoteSelectableText.paragraphRange(
+                      in: view.text, at: view.offset(from: view.beginningOfDocument, to: position)
+                  )
+            else { return }
+
+            if !view.isFirstResponder { view.becomeFirstResponder() }
+            view.selectedRange = range
+            if let menu = view.interactions.first(where: { $0 is UIEditMenuInteraction }) as? UIEditMenuInteraction {
+                menu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
+            }
+        }
+    }
+
+    static func paragraphRange(in text: String, at offset: Int) -> NSRange? {
+        let text = text as NSString
+        guard offset >= 0, offset <= text.length, text.length > 0 else { return nil }
+        var start = 0
+        var contentEnd = 0
+        text.getParagraphStart(&start, end: nil, contentsEnd: &contentEnd, for: NSRange(location: offset, length: 0))
+        guard contentEnd > start else { return nil }
+        return NSRange(location: start, length: contentEnd - start)
     }
 
     static func markdown(_ markdown: String, font: UIFont, color: UIColor) -> NSAttributedString {

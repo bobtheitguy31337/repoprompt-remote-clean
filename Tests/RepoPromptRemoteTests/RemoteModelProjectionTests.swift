@@ -7,6 +7,15 @@ import XCTest
 
 @MainActor
 final class RemoteSelectableTextTests: XCTestCase {
+    func testTripleTapRangeUsesParagraphBoundariesAndUTF16Offsets() throws {
+        let message = "First sentence. Still first.\r\n🐈 Second sentence. Still second.\nThird."
+        let text = message as NSString
+        let offset = text.range(of: "Still second").location
+        let range = try XCTUnwrap(RemoteSelectableText.paragraphRange(in: message, at: offset))
+        XCTAssertEqual(text.substring(with: range), "🐈 Second sentence. Still second.")
+        XCTAssertNil(RemoteSelectableText.paragraphRange(in: "", at: 0))
+    }
+
     func testProseUsesOneReadOnlyNativeTextViewWithSelectableRanges() throws {
         let view = RemoteMarkdownText(markdown: """
         First **paragraph**.
