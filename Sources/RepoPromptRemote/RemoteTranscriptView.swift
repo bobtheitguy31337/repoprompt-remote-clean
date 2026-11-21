@@ -928,22 +928,20 @@ struct RemoteChatComposer: View {
 
                 RemoteAttachmentDraftStrip(draft: attachments, isSending: pendingCommandID != nil)
                 HStack(alignment: .center, spacing: 8) {
-                    if model.agentCatalogMetadata?.supportsAttachments == true {
+                    if policy.canAttach, model.agentCatalogMetadata?.supportsAttachments == true {
                         RemoteAttachmentPicker(
                             draft: attachments,
-                            isEnabled: policy.canAttach && model.canSendAttachments && pendingCommandID == nil,
+                            isEnabled: model.canSendAttachments && pendingCommandID == nil,
                             onError: model.presentError
                         )
-                        .padding(.leading, 6)
                     }
                     TextField(placeholder, text: $message, axis: .vertical)
                         .lineLimit(1...6)
                         .textFieldStyle(.plain)
                         .font(.body)
-                        .padding(.leading, 12)
+                        .multilineTextAlignment(.leading)
                         .padding(.vertical, 10)
-                        .frame(minHeight: 46, alignment: .center)
-                        .offset(y: 5)
+                        .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
                         .submitLabel(.send)
                         .onSubmit(send)
                         .disabled(!model.canControlChat || policy.primaryOperation == nil || pendingCommandID != nil)
@@ -968,8 +966,8 @@ struct RemoteChatComposer: View {
                     }
 
                     RemoteComposerSendButton(title: "Send", isEnabled: canSend, action: send)
-                        .padding(.trailing, 8)
                 }
+                .padding(.horizontal, 12)
                 .padding(.vertical, 4)
 
                 if showsSelection {
@@ -1004,7 +1002,7 @@ struct RemoteChatComposer: View {
             allowedAgentIDs: controls.map { Set($0.agent.allowedValueIDs) },
             allowedModelIDs: controls.map { Set($0.model.allowedValueIDs) },
             allowedReasoningEffortIDs: controls.map { Set($0.reasoningEffort.allowedValueIDs) },
-            allowsAgentSwitch: sessionID == nil,
+            allowsAgentSwitch: sessionID == nil || controls?.agent.isMutable == true,
             isModelMutable: model.canControlChat && (controls?.model.isMutable ?? true),
             isEffortMutable: model.canControlChat && (controls?.reasoningEffort.isMutable ?? true),
             isPending: isPending,
@@ -1061,18 +1059,17 @@ struct RemoteChatComposer: View {
         }
     }
 
-    private func configureModel(agentID: String, modelID: String, reasoningEffortID: String?) {
+    private func configureModel(agentID: String, modelID: String) {
         guard model.canControlChat, pendingConfigurationID == nil, pendingCommandID == nil else { return }
         if let sessionID {
             pendingConfigurationID = model.configureSession(
                 sessionID: sessionID,
                 workspaceID: workspaceID,
                 agentID: agentID,
-                modelID: modelID,
-                reasoningEffort: reasoningEffortID
+                modelID: modelID
             )
         } else {
-            draftSelection = RemoteAgentSelection(agentID: agentID, modelID: modelID, reasoningEffort: reasoningEffortID)
+            draftSelection = RemoteAgentSelection(agentID: agentID, modelID: modelID, reasoningEffort: nil)
         }
     }
 

@@ -2093,7 +2093,7 @@ struct SessionRow: Identifiable, Equatable {
         workflowID = session.workflowID
         agent = selectionOverride?.agentID ?? session.agent
         model = selectionOverride?.modelID ?? session.model
-        reasoningEffort = selectionOverride?.reasoningEffort ?? session.reasoningEffort
+        reasoningEffort = selectionOverride.map(\.reasoningEffort) ?? session.reasoningEffort
         configurationControls = session.configurationControls
         runStartedAt = session.runStartedAt
         lifecycleStage = session.lifecycleStage

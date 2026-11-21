@@ -264,25 +264,9 @@ struct RemoteComposerSurface<Content: View>: View {
 
     var body: some View {
         content
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.16), Color.black.opacity(0.28)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-            }
-            .shadow(color: .black.opacity(0.24), radius: 7, y: 3)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.remoteChatBackground)
+            .frame(maxWidth: .infinity)
+            .background(.regularMaterial, ignoresSafeAreaEdges: .bottom)
+            .overlay(alignment: .top) { Divider() }
     }
 }
 
@@ -300,41 +284,20 @@ struct RemoteAgentSelectionBar: View {
     let isPending: Bool
     let toolCatalog: RemoteToolCatalog?
     let canEditTools: Bool
-    let onSelectModel: (_ agentID: String, _ modelID: String, _ reasoningEffortID: String?) -> Void
+    let onSelectModel: (_ agentID: String, _ modelID: String) -> Void
     let onSelectReasoningEffort: (_ reasoningEffortID: String) -> Void
     let onToggleTool: (_ setting: RemoteToolSettingDescriptor, _ revision: Int) -> Void
 
     @State private var showsModelPicker = false
-    @State private var modelPickerAgents: [RemoteAgentDescriptor] = []
-    @State private var modelPickerSelectedAgentID: String?
-    @State private var modelPickerSelectedModelID: String?
-
-    private var selectedAgent: RemoteAgentDescriptor? {
-        agents.first(where: { $0.id == selectedAgentID })
-    }
-
     private var selectedModel: RemoteModelDescriptor? {
-        selectedAgent?.modelDescriptors?.first(where: { $0.id == selectedModelID })
-    }
-
-    private var modelOptions: [RemoteAgentDescriptor] {
-        agents.compactMap { agent in
-            let models = agent.modelDescriptors?.filter(\.isAvailable) ?? []
-            guard agent.isAvailable, !models.isEmpty else { return nil }
-            return RemoteAgentDescriptor(
-                id: agent.id,
-                displayName: agent.displayName,
-                models: models.map(\.id),
-                isAvailable: true,
-                modelDescriptors: models,
-                defaultModelID: agent.defaultModelID
-            )
-        }
+        agents.first(where: { $0.id == selectedAgentID })?.modelDescriptors?.first(where: { $0.id == selectedModelID })
     }
 
     private var hasSelectableModel: Bool {
-        modelOptions.contains { agent in
-            agent.modelDescriptors?.contains { canSelectModel($0.id, for: agent.id) } == true
+        agents.contains { agent in
+            agent.isAvailable && agent.modelDescriptors?.contains {
+                $0.isAvailable && canSelectModel($0.id, for: agent.id)
+            } == true
         }
     }
 
@@ -356,9 +319,6 @@ struct RemoteAgentSelectionBar: View {
     var body: some View {
         HStack(spacing: 8) {
             Button {
-                modelPickerAgents = modelOptions
-                modelPickerSelectedAgentID = selectedAgentID
-                modelPickerSelectedModelID = selectedModelID
                 showsModelPicker = true
             } label: {
                 HStack(spacing: 5) {
@@ -378,18 +338,18 @@ struct RemoteAgentSelectionBar: View {
             .sheet(isPresented: $showsModelPicker) {
                 NavigationStack {
                     List {
-                        ForEach(modelPickerAgents, id: \.id) { agent in
+                        ForEach(agents.filter(\.isAvailable), id: \.id) { agent in
                             Section(agent.displayName) {
-                                ForEach(agent.modelDescriptors ?? [], id: \.id) { candidate in
+                                ForEach((agent.modelDescriptors ?? []).filter(\.isAvailable), id: \.id) { candidate in
                                     Button {
-                                        onSelectModel(agent.id, candidate.id, candidate.defaultReasoningEffortID)
+                                        onSelectModel(agent.id, candidate.id)
                                         showsModelPicker = false
                                     } label: {
                                         HStack {
-                                            Text(candidate.displayName)
+                                            Text(RemoteLaunchSelection.modelLabel(candidate.displayName))
                                             Spacer()
-                                            if agent.id == modelPickerSelectedAgentID,
-                                               candidate.id == modelPickerSelectedModelID
+                                            if agent.id == selectedAgentID,
+                                               candidate.id == selectedModelID
                                             {
                                                 Image(systemName: "checkmark")
                                             }
@@ -437,6 +397,8 @@ struct RemoteAgentSelectionBar: View {
                     .frame(minHeight: 30)
                     .background(Color.primary.opacity(0.08), in: Capsule())
                 }
+                .accessibilityLabel("Reasoning level")
+                .accessibilityValue(effortLabel)
                 .disabled(!effortOptions.contains { canSelectEffort($0.id) })
             }
 
@@ -453,17 +415,14 @@ struct RemoteAgentSelectionBar: View {
     }
 
     private var modelLabel: String {
-        let agentName = selectedAgent?.displayName ?? "Agent"
-        let modelName = selectedModel?.displayName ?? selectedModelID ?? "Mac default"
-        return "\(agentName) · \(modelName)"
+        RemoteLaunchSelection.modelLabel(selectedModel?.displayName ?? selectedModelID ?? "Mac default")
     }
 
     private var effortLabel: String {
         effortOptions.first(where: { $0.id == selectedReasoningEffortID })?.displayName
             ?? selectedReasoningEffortID?.capitalized
-            ?? "Effort"
+            ?? "Reasoning"
     }
-
 }
 
 private struct RemoteToolsButton: View {

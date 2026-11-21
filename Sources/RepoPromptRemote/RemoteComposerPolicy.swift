@@ -69,12 +69,17 @@ enum RemoteLaunchSelection {
                   let model = agent.modelDescriptors?.first(where: { $0.id == selection.modelID && $0.isAvailable })
             else { continue }
             let requested = model.reasoningEfforts.first { $0.id == selection.reasoningEffort }?.id
+            let fallback = model.reasoningEfforts.first { $0.id == model.defaultReasoningEffortID }?.id
             return RemoteAgentSelection(
                 agentID: agent.id,
                 modelID: model.id,
-                reasoningEffort: requested ?? model.defaultReasoningEffortID
+                reasoningEffort: requested ?? fallback
             )
         }
         return nil
+    }
+
+    static func modelLabel(_ displayName: String) -> String {
+        displayName.replacingOccurrences(of: #"(?i)\bsol$"#, with: "SOL", options: .regularExpression)
     }
 }

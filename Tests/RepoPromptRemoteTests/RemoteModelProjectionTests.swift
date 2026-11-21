@@ -751,6 +751,19 @@ final class RemoteWorkspaceHistoryTests: XCTestCase {
 }
 
 final class RemoteComposerPolicyTests: XCTestCase {
+    func testProviderSwitchDoesNotCarryUnsupportedReasoningEffort() {
+        let model = RemoteModelDescriptor(id: "other-model", displayName: "Other", defaultReasoningEffortID: "medium")
+        let agent = RemoteAgentDescriptor(
+            id: "other", displayName: "Other", models: [model.id], isAvailable: true, modelDescriptors: [model]
+        )
+        let draft = RemoteAgentSelection(agentID: agent.id, modelID: model.id, reasoningEffort: "high")
+        XCTAssertEqual(
+            RemoteLaunchSelection.resolve(draft: draft, desktopDefault: nil, agents: [agent]),
+            RemoteAgentSelection(agentID: agent.id, modelID: model.id, reasoningEffort: nil)
+        )
+        XCTAssertEqual(RemoteLaunchSelection.modelLabel("GPT-5.6 Sol"), "GPT-5.6 SOL")
+    }
+
     func testNewChatUsesOrdinaryComposerControlsAndRetainsTheResolvedEffort() {
         XCTAssertEqual(RemoteComposerPolicy.newChat.primaryOperation, .startRun)
         XCTAssertTrue(RemoteComposerPolicy.newChat.canAttach)
