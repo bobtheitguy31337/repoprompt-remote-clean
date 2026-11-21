@@ -54,6 +54,22 @@ final class RemoteSelectableTextTests: XCTestCase {
     }
 }
 
+final class RemoteImageDownloadTests: XCTestCase {
+    func testDownloadsOnlyContiguousChunksFromTheSameImageRevision() throws {
+        let chunkSize = RemoteImageAttachmentRequest.chunkBytes
+        let first = Data(repeating: 1, count: chunkSize)
+        let tail = Data([2, 3])
+        var image = RemoteImageDownload()
+        try image.append(.init(offset: 0, totalBytes: chunkSize + 2, revision: "first", bytes: first))
+        XCTAssertFalse(image.isComplete)
+        XCTAssertThrowsError(try image.append(.init(offset: chunkSize, totalBytes: chunkSize + 2, revision: "other", bytes: tail)))
+        XCTAssertThrowsError(try image.append(.init(offset: chunkSize + 1, totalBytes: chunkSize + 2, revision: "first", bytes: tail)))
+        try image.append(.init(offset: chunkSize, totalBytes: chunkSize + 2, revision: "first", bytes: tail))
+        XCTAssertTrue(image.isComplete)
+        XCTAssertEqual(image.bytes, first + tail)
+    }
+}
+
 final class RemoteTranscriptTimelineTests: XCTestCase {
     func testRecentInitialOlderAndLatestPagesMergeByIdentity() {
         let sessionID = UUID()

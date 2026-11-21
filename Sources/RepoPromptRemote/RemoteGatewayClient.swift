@@ -5,6 +5,8 @@ import RepoPromptRemoteProtocol
 enum RemoteGatewayError: LocalizedError {
     case invalidResponse
     case attachmentRejected(String)
+    case imageUnavailable
+    case imageUpgradeRequired
     case httpStatus(Int, RemoteErrorResponse?)
     case protocolMismatch(Int)
     case certificateMismatch
@@ -15,12 +17,37 @@ enum RemoteGatewayError: LocalizedError {
         switch self {
         case .invalidResponse: "The Mac returned an invalid response."
         case let .attachmentRejected(message): message
+        case .imageUnavailable: "The image is unavailable on the Mac."
+        case .imageUpgradeRequired: "Update RepoPrompt on the Mac to open the full image."
         case let .httpStatus(status, error): error?.message ?? "The Mac returned HTTP \(status)."
         case let .protocolMismatch(version): "This Mac requires an unsupported remote protocol version (\(version))."
         case .certificateMismatch: "The Mac identity did not match the pairing record."
         case .snapshotRequired: "The saved event cursor is no longer available; a fresh snapshot is required."
         case .credentialRejected: "The paired Mac rejected this credential; re-pairing is required."
         }
+    }
+}
+
+struct RemoteImageDownload {
+    private(set) var bytes = Data()
+    private(set) var revision: String?
+    private var totalBytes: Int?
+
+    var isComplete: Bool { totalBytes == bytes.count }
+
+    mutating func append(_ chunk: RemoteImageAttachmentChunk) throws {
+        guard chunk.offset == bytes.count,
+              (1 ... RemoteAttachmentLimits.maxFileBytes).contains(chunk.totalBytes),
+              chunk.offset < chunk.totalBytes,
+              chunk.bytes.count == min(RemoteImageAttachmentRequest.chunkBytes, chunk.totalBytes - chunk.offset),
+              let revision = chunk.revision, !revision.isEmpty, revision.utf8.count <= 128,
+              self.revision == nil || self.revision == revision,
+              totalBytes == nil || totalBytes == chunk.totalBytes
+        else { throw RemoteGatewayError.invalidResponse }
+
+        self.revision = revision
+        totalBytes = chunk.totalBytes
+        bytes.append(chunk.bytes)
     }
 }
 
@@ -43,6 +70,7 @@ protocol RemoteGatewayTransport: AnyObject {
     func contextBuilder(_ request: RemoteCommandRequest) async throws -> RemoteCommandResponse
     func command(_ request: RemoteCommandRequest) async throws -> RemoteCommandResponse
     func history(_ request: RemoteHistoryRPCRequest) async throws -> RemoteHistoryPage
+    func imageAttachment(_ request: RemoteImageAttachmentRequest) async throws -> RemoteImageAttachmentChunk
     func transcript(
         sessionID: UUID,
         afterSequenceIndex: Int?,
@@ -234,6 +262,10 @@ final class RemoteHTTPSGatewayTransport: RemoteGatewayTransport {
             throw RemoteGatewayError.protocolMismatch(response.protocolVersion)
         }
         return response
+    }
+
+    func imageAttachment(_ request: RemoteImageAttachmentRequest) async throws -> RemoteImageAttachmentChunk {
+        try await send(path: RemoteProtocol.imageAttachmentPath, method: "POST", body: request)
     }
 
     static func historyQueryItems(_ request: RemoteHistoryRPCRequest) -> [URLQueryItem] {

@@ -213,6 +213,10 @@ final class RemoteIrohGatewayTransport: RemoteGatewayTransport, @unchecked Senda
         try await rpc(.history, payload: encoder.encode(request))
     }
 
+    func imageAttachment(_ request: RemoteImageAttachmentRequest) async throws -> RemoteImageAttachmentChunk {
+        try await rpc(.imageAttachment, payload: encoder.encode(request))
+    }
+
     func transcript(
         sessionID: UUID,
         afterSequenceIndex: Int?,

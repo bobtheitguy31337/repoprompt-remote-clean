@@ -1,6 +1,9 @@
+import ImageIO
 import SwiftUI
 import UIKit
 import RepoPromptRemoteProtocol
+
+private let transcriptBubbleRadius: CGFloat = 15
 
 enum RemoteTranscriptViewportUpdate: Equatable {
     case initial
@@ -283,14 +286,13 @@ struct RemoteChatView: View {
     private func presentationView(_ element: RemoteTranscriptPresentationElement) -> some View {
         switch element {
         case let .narrative(item, semantic):
-            RemoteNarrativeRow(item: item, semantic: semantic) {
-                model.loadTranscriptDetails(for: sessionID, itemID: item.id)
-            }
+            RemoteNarrativeRow(sessionID: sessionID, item: item, semantic: semantic)
                 .id(item.id)
                 .onAppear { visibleItemIDs.insert(item.id) }
                 .onDisappear { visibleItemIDs.remove(item.id) }
         case let .activityGroup(groupItems, exceptional):
             RemoteActivityGroupView(
+                sessionID: sessionID,
                 items: groupItems,
                 exceptional: exceptional,
                 isExpanded: exceptional != expandedGroupIDs.contains(element.id),
@@ -355,9 +357,9 @@ struct RemoteChatView: View {
 }
 
 private struct RemoteNarrativeRow: View {
+    let sessionID: UUID
     let item: RemoteTranscriptItem
     let semantic: RemoteTranscriptSemanticKind
-    let loadDetails: () -> Void
 
     private var isUser: Bool { semantic == .userRequest }
     private var isSummary: Bool { semantic == .summary }
@@ -389,11 +391,11 @@ private struct RemoteNarrativeRow: View {
                     .padding(.vertical, 10)
                     .background(
                         isUser ? Color.remoteUserBubble : Color.remoteChatBackground,
-                        in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: transcriptBubbleRadius, style: .continuous)
                     )
                 }
 
-                RemoteTranscriptAttachments(item: item, loadDetails: loadDetails)
+                RemoteTranscriptAttachments(sessionID: sessionID, item: item, alignment: isUser ? .trailing : .leading)
                 Text(item.timestamp, style: .time)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -404,42 +406,200 @@ private struct RemoteNarrativeRow: View {
 }
 
 private struct RemoteTranscriptAttachments: View {
-    @EnvironmentObject private var model: RemoteAppModel
+    let sessionID: UUID
     let item: RemoteTranscriptItem
-    let loadDetails: () -> Void
+    var alignment: Alignment = .leading
 
     var body: some View {
         ForEach(item.attachments ?? []) { attachment in
-            if let data = attachment.thumbnail, let image = UIImage(data: data) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 250, maxHeight: 250)
-                    .clipShape(.rect(cornerRadius: 9))
-                    .accessibilityLabel(attachment.name)
-            } else if attachment.isImage {
-                Button(action: loadDetails) {
-                    Label(attachment.name, systemImage: "photo")
-                }
-                .buttonStyle(.bordered)
-                .disabled(model.transcriptDetailStates[item.id] == .loading)
-                .accessibilityHint("Loads the image preview from the Mac")
+            if attachment.isImage {
+                RemoteTranscriptPhoto(sessionID: sessionID, itemID: item.id, attachment: attachment, alignment: alignment)
             } else {
                 Label(attachment.name, systemImage: "doc")
                     .padding(7)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
             }
         }
         .font(.caption)
+    }
+}
 
-        if item.attachments?.contains(where: { $0.isImage && $0.thumbnail == nil }) == true {
-            switch model.transcriptDetailStates[item.id] {
-            case .loading?: ProgressView("Loading previews…").font(.caption)
-            case .failed?: Text("Preview request failed. Tap the image to retry.").font(.caption)
-            case .loaded?: Text("Preview unavailable").font(.caption).foregroundStyle(.secondary)
-            default: EmptyView()
+private struct RemoteTranscriptPhoto: View {
+    @EnvironmentObject private var model: RemoteAppModel
+    let sessionID: UUID
+    let itemID: UUID
+    let attachment: RemoteTranscriptAttachment
+    let alignment: Alignment
+    @State private var thumbnail: UIImage?
+    @State private var failed = false
+    @State private var retry = 0
+    @State private var showsOriginal = false
+
+    private let thumbnailBounds = CGSize(width: 204, height: 144)
+
+    var body: some View {
+        Group {
+            if let thumbnail {
+                let aspectFit = min(thumbnailBounds.width / thumbnail.size.width, thumbnailBounds.height / thumbnail.size.height)
+                Button {
+                    showsOriginal = true
+                } label: {
+                    Image(uiImage: thumbnail)
+                        .resizable()
+                        .frame(width: thumbnail.size.width * aspectFit, height: thumbnail.size.height * aspectFit)
+                        .clipShape(.rect(cornerRadius: transcriptBubbleRadius))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(attachment.name)
+                .accessibilityHint("Opens the image")
+            } else {
+                Group {
+                    if failed {
+                        Button {
+                            failed = false
+                            retry += 1
+                        } label: {
+                            Label("Retry preview", systemImage: "arrow.clockwise")
+                        }
+                        .accessibilityHint(attachment.name)
+                    } else {
+                        ProgressView()
+                            .accessibilityLabel("Loading \(attachment.name)")
+                    }
+                }
+                .frame(width: thumbnailBounds.width, height: thumbnailBounds.height)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: transcriptBubbleRadius))
             }
         }
+        .frame(height: thumbnailBounds.height, alignment: alignment)
+        .task(id: LoadIdentity(connection: model.connectionState, retry: retry, supportsOriginal: model.supportsOriginalImages)) {
+            await loadThumbnail()
+        }
+        .fullScreenCover(isPresented: $showsOriginal) {
+            RemoteFullImageViewer(
+                attachment: attachment, thumbnail: thumbnail,
+                load: { try await model.originalImage(sessionID: sessionID, itemID: itemID, attachmentID: attachment.id) }
+            )
+        }
+    }
+
+    private func loadThumbnail() async {
+        guard thumbnail == nil else { return }
+        if let data = attachment.thumbnail, let image = UIImage(data: data) {
+            thumbnail = image
+            return
+        }
+        guard model.connectionState == .connected else { return }
+        failed = false
+        do {
+            let data = try await model.imageThumbnail(sessionID: sessionID, itemID: itemID, attachmentID: attachment.id)
+            try Task.checkCancellation()
+            guard let image = UIImage(data: data) else { throw RemoteGatewayError.invalidResponse }
+            thumbnail = image
+        } catch {
+            if !Task.isCancelled { failed = true }
+        }
+    }
+
+    private struct LoadIdentity: Equatable {
+        let connection: RemoteAppModel.ConnectionState
+        let retry: Int
+        let supportsOriginal: Bool
+    }
+}
+
+private struct RemoteFullImageViewer: View {
+    @Environment(\.dismiss) private var dismiss
+    let attachment: RemoteTranscriptAttachment
+    let thumbnail: UIImage?
+    let load: () async throws -> Data
+    @State private var image: UIImage?
+    @State private var failure: String?
+    @State private var retry = 0
+    @State private var canRetry = true
+    @State private var zoom: CGFloat = 1
+    @GestureState private var magnification: CGFloat = 1
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geometry in
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    if let image {
+                        let scale = min(max(zoom * magnification, 1), 5)
+                        ScrollView([.horizontal, .vertical], showsIndicators: false) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFit()
+                                .clipShape(.rect(cornerRadius: transcriptBubbleRadius))
+                                .frame(width: geometry.size.width * scale, height: geometry.size.height * scale)
+                                .accessibilityLabel(attachment.name)
+                        }
+                        .defaultScrollAnchor(.center)
+                        .simultaneousGesture(MagnifyGesture()
+                            .updating($magnification) { gesture, value, _ in value = gesture.magnification }
+                            .onEnded { gesture in zoom = min(max(zoom * gesture.magnification, 1), 5) })
+                    } else {
+                        if let thumbnail {
+                            Image(uiImage: thumbnail)
+                                .resizable()
+                                .scaledToFit()
+                                .clipShape(.rect(cornerRadius: transcriptBubbleRadius))
+                                .padding(12)
+                                .accessibilityHidden(true)
+                        }
+                        VStack {
+                            if let failure {
+                                Text(failure).multilineTextAlignment(.center)
+                                if canRetry {
+                                    Button("Retry") { retry += 1 }.buttonStyle(.borderedProminent)
+                                }
+                            } else {
+                                ProgressView("Loading full image…")
+                            }
+                        }
+                        .padding(14)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: transcriptBubbleRadius))
+                    }
+                }
+            }
+            .navigationTitle(attachment.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .task(id: retry) {
+            failure = nil
+            canRetry = true
+            do {
+                let bytes = try await load()
+                let worker = Task.detached(priority: .userInitiated) { Self.decodedImage(bytes) }
+                let decoded = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+                try Task.checkCancellation()
+                guard let decoded else { throw RemoteGatewayError.invalidResponse }
+                image = decoded
+            } catch {
+                guard !Task.isCancelled else { return }
+                if case RemoteGatewayError.imageUpgradeRequired = error { canRetry = false }
+                failure = error.localizedDescription
+            }
+        }
+    }
+
+    private nonisolated static func decodedImage(_ bytes: Data) -> UIImage? {
+        guard !Task.isCancelled,
+              let source = CGImageSourceCreateWithData(bytes as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let pixels = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 4096
+              ] as CFDictionary)
+        else { return nil }
+        return UIImage(cgImage: pixels)
     }
 }
 
@@ -663,7 +823,9 @@ private struct RemoteMarkdownImage: View {
             AsyncImage(url: url) { phase in
                 switch phase {
                 case let .success(image):
-                    image.resizable().scaledToFit().accessibilityLabel(label)
+                    image.resizable().scaledToFit()
+                        .clipShape(.rect(cornerRadius: transcriptBubbleRadius))
+                        .accessibilityLabel(label)
                 case .failure:
                     Label("Image unavailable", systemImage: "photo").accessibilityHint(label)
                 default:
@@ -837,6 +999,7 @@ private struct RemoteRunNotice: View {
 }
 
 private struct RemoteActivityGroupView: View {
+    let sessionID: UUID
     let items: [RemoteTranscriptItem]
     let exceptional: Bool
     let isExpanded: Bool
@@ -911,6 +1074,7 @@ private struct RemoteActivityGroupView: View {
                 VStack(spacing: 8) {
                     ForEach(items) { item in
                         RemoteActivityItemView(
+                            sessionID: sessionID,
                             item: item,
                             isExpanded: expandedDetailIDs.contains(item.id),
                             onToggleDetails: { onToggleDetails(item) },
@@ -931,6 +1095,7 @@ private struct RemoteActivityGroupView: View {
 
 private struct RemoteActivityItemView: View {
     @EnvironmentObject private var model: RemoteAppModel
+    let sessionID: UUID
     let item: RemoteTranscriptItem
     let isExpanded: Bool
     let onToggleDetails: () -> Void
@@ -964,7 +1129,7 @@ private struct RemoteActivityItemView: View {
                     .accessibilityLabel(isExpanded ? "Hide tool details" : "Show tool details")
                 }
             }
-            RemoteTranscriptAttachments(item: item, loadDetails: onLoadDetails)
+            RemoteTranscriptAttachments(sessionID: sessionID, item: item)
             if isExpanded {
                 if let detail = item.detail {
                     RemoteToolDetails(detail: detail, showsSummary: item.text == nil)

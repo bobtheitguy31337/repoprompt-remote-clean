@@ -207,6 +207,13 @@ final class RemoteAppModel: ObservableObject {
     private static let unpairDeadline: Duration = .milliseconds(1_500)
     private let credentialStore = RemoteCredentialStore()
     private let irohIdentityStore = RemoteIrohIdentityStore()
+    private var activeImageReads = 0
+    private var waitingImageReads: [(UUID, CheckedContinuation<Void, Error>)] = []
+    private let imageThumbnails: NSCache<NSString, NSData> = {
+        let cache = NSCache<NSString, NSData>()
+        cache.totalCostLimit = 8 * 1024 * 1024
+        return cache
+    }()
     private var gateway: (any RemoteGatewayTransport)?
     private var storedCredential: StoredRemoteCredential?
     private var reducer = RemoteSnapshotReducer()
@@ -850,6 +857,106 @@ final class RemoteAppModel: ObservableObject {
         }
     }
 
+    var supportsOriginalImages: Bool { agentCatalogMetadata?.supportsImageAttachments == true }
+
+    func imageThumbnail(sessionID: UUID, itemID: UUID, attachmentID: UUID) async throws -> Data {
+        let desktop = snapshot?.desktop.instanceID
+        let key = "\(desktop ?? ""):\(sessionID):\(itemID):\(attachmentID)" as NSString
+        if let cached = imageThumbnails.object(forKey: key) { return cached as Data }
+
+        let bytes: Data
+        if supportsOriginalImages {
+            let chunk = try await fetchImageChunk(
+                RemoteImageAttachmentRequest(sessionID: sessionID, itemID: itemID, attachmentID: attachmentID, variant: .thumbnail)
+            )
+            guard chunk.offset == 0, chunk.revision == nil,
+                  chunk.totalBytes == chunk.bytes.count,
+                  (1 ... RemoteImageAttachmentRequest.maxThumbnailBytes).contains(chunk.bytes.count)
+            else { throw RemoteGatewayError.invalidResponse }
+            bytes = chunk.bytes
+        } else {
+            // Older Macs can still supply the existing preview through the exact transcript row.
+            guard let gateway else { throw RemotePairingError.unavailableDesktop }
+            let page = try await withImageReadSlot {
+                try await gateway.transcript(sessionID: sessionID, itemID: itemID, limit: 1, includeDetails: true)
+            }
+            guard let preview = page.items.first(where: { $0.id == itemID })?.attachments?
+                .first(where: { $0.id == attachmentID })?.thumbnail
+            else { throw RemoteGatewayError.imageUnavailable }
+            bytes = preview
+        }
+        try Task.checkCancellation()
+        guard snapshot?.desktop.instanceID == desktop else { throw CancellationError() }
+        imageThumbnails.setObject(bytes as NSData, forKey: key, cost: bytes.count)
+        return bytes
+    }
+
+    func originalImage(sessionID: UUID, itemID: UUID, attachmentID: UUID) async throws -> Data {
+        guard supportsOriginalImages else { throw RemoteGatewayError.imageUpgradeRequired }
+        let desktop = snapshot?.desktop.instanceID
+        var download = RemoteImageDownload()
+        while !download.isComplete {
+            try Task.checkCancellation()
+            guard snapshot?.desktop.instanceID == desktop else { throw CancellationError() }
+            let chunk = try await fetchImageChunk(RemoteImageAttachmentRequest(
+                sessionID: sessionID, itemID: itemID, attachmentID: attachmentID, variant: .original,
+                offset: download.bytes.count, revision: download.revision
+            ))
+            try download.append(chunk)
+        }
+        try Task.checkCancellation()
+        guard snapshot?.desktop.instanceID == desktop else { throw CancellationError() }
+        return download.bytes
+    }
+
+    private func fetchImageChunk(_ request: RemoteImageAttachmentRequest) async throws -> RemoteImageAttachmentChunk {
+        let desktop = snapshot?.desktop.instanceID
+        for delay in [Duration.zero, .milliseconds(250), .milliseconds(750)] {
+            try await Task.sleep(for: delay)
+            guard snapshot?.desktop.instanceID == desktop else { throw CancellationError() }
+            do {
+                guard let gateway else { throw RemotePairingError.unavailableDesktop }
+                return try await withImageReadSlot { try await gateway.imageAttachment(request) }
+            } catch {
+                if delay == .milliseconds(750) || isExpectedCancellation(error) { throw error }
+                if case let RemoteGatewayError.httpStatus(_, response) = error, response?.retryable != true { throw error }
+            }
+        }
+        throw RemoteGatewayError.imageUnavailable
+    }
+
+    /// Leave room on the shared Iroh connection for transcript and control RPCs when many photos appear together.
+    private func withImageReadSlot<Result>(_ read: () async throws -> Result) async throws -> Result {
+        if activeImageReads < 3 {
+            activeImageReads += 1
+        } else {
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else {
+                        waitingImageReads.append((id, continuation))
+                    }
+                }
+            } onCancel: {
+                Task { @MainActor in
+                    guard let index = self.waitingImageReads.firstIndex(where: { $0.0 == id }) else { return }
+                    self.waitingImageReads.remove(at: index).1.resume(throwing: CancellationError())
+                }
+            }
+        }
+        defer {
+            if waitingImageReads.isEmpty {
+                activeImageReads -= 1
+            } else {
+                waitingImageReads.removeFirst().1.resume()
+            }
+        }
+        try Task.checkCancellation()
+        return try await read()
+    }
+
     func transcriptHasMore(for sessionID: UUID) -> Bool {
         transcriptTimelinesBySessionID[sessionID]?.hasOlder == true
     }
@@ -1163,6 +1270,7 @@ final class RemoteAppModel: ObservableObject {
         workspaceHistory = [:]
         cancelAllTranscriptTasks()
         transcriptTimelinesBySessionID = [:]
+        imageThumbnails.removeAllObjects()
         knownTranscriptRevisions = [:]
         unseenStateBySessionID = [:]
         provisionalSessionRoutes = [:]
