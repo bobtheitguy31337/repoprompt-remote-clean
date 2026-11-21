@@ -275,6 +275,24 @@ final class RemoteTranscriptTimelineTests: XCTestCase {
         XCTAssertEqual(timeline.loadedRevision, 6)
     }
 
+    func testSavedChatConfigurationSurvivesLoadingOlderMessages() {
+        let sessionID = UUID()
+        let selection = RemoteAgentSelection(agentID: "codexExec", modelID: "gpt-5.6-sol", reasoningEffort: "high")
+        let configuration = RemoteChatConfiguration(selection: selection)
+        var timeline = RemoteTranscriptTimelineState()
+        let initial = timeline.begin(.initial)
+        XCTAssertTrue(timeline.apply(
+            RemoteTranscriptPage(sessionID: sessionID, items: [], chatConfiguration: configuration),
+            kind: .initial, generation: initial
+        ))
+
+        let older = timeline.begin(.older)
+        XCTAssertTrue(timeline.apply(
+            RemoteTranscriptPage(sessionID: sessionID, items: []), kind: .older, generation: older
+        ))
+        XCTAssertEqual(timeline.chatConfiguration, configuration)
+    }
+
     func testLateDetailResponseCannotOverwriteNewerVisibleTranscriptFields() {
         let sessionID = UUID()
         var timeline = RemoteTranscriptTimelineState()
@@ -372,6 +390,19 @@ final class RemoteTranscriptTimelineTests: XCTestCase {
 }
 
 final class RemoteSessionNavigationProjectionTests: XCTestCase {
+    func testSwitchingWorkspacesLeavesTheChatListSelectedWhenHistoryArrives() {
+        let latest = UUID()
+        XCTAssertNil(RemoteSessionNavigationProjection.selectionID(
+            current: nil, chatIDs: [], allowsInitialSelection: false
+        ))
+        XCTAssertNil(RemoteSessionNavigationProjection.selectionID(
+            current: nil, chatIDs: [latest], allowsInitialSelection: false
+        ))
+        XCTAssertEqual(RemoteSessionNavigationProjection.selectionID(
+            current: nil, chatIDs: [latest], allowsInitialSelection: true
+        ), latest)
+    }
+
     func testHierarchyIsDepthFirstAndRootsUseNewestSubtreeActivity() {
         let rootA = uuid(1)
         let childA = uuid(2)
@@ -403,7 +434,7 @@ final class RemoteSessionNavigationProjectionTests: XCTestCase {
         XCTAssertEqual(rows[1].validParentID, rootA)
         XCTAssertEqual(rows[1].status, .completed(unseen: true))
         XCTAssertEqual(rows[2].status, .working)
-        XCTAssertEqual(RemoteSessionNavigationProjection.stableSelectionID(current: rootB, rows: rows), rootB)
+        XCTAssertEqual(RemoteSessionNavigationProjection.selectionID(current: rootB, chatIDs: rows.map(\.id), allowsInitialSelection: false), rootB)
     }
 
     func testMalformedParentsAndEveryDescendantWhoseAncestorWalkReachesCycleBecomeRoots() {
@@ -477,7 +508,7 @@ final class RemoteSessionNavigationProjectionTests: XCTestCase {
             unseenBySessionID: [:]
         )
         XCTAssertNotEqual(first.map(\.id), reordered.map(\.id))
-        XCTAssertEqual(RemoteSessionNavigationProjection.stableSelectionID(current: selected, rows: reordered), selected)
+        XCTAssertEqual(RemoteSessionNavigationProjection.selectionID(current: selected, chatIDs: reordered.map(\.id), allowsInitialSelection: false), selected)
     }
 
     private func chat(_ id: UUID, activity: Double = 0) -> RemoteChatListItem {

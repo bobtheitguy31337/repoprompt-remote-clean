@@ -134,10 +134,12 @@ struct RemoteAttachmentPicker: View {
                 if draft.isLoading {
                     ProgressView().controlSize(.small)
                 } else {
-                    Image(systemName: "paperclip").font(.body.weight(.semibold))
+                    Image(systemName: "plus").font(.body.weight(.semibold))
                 }
             }
-            .frame(width: 36, height: 40)
+            .frame(width: 34, height: 38)
+            .foregroundStyle(Color.remoteWarmOrange)
+            .contentShape(Rectangle())
         }
         .disabled(!isEnabled || draft.isLoading || draft.files.count >= RemoteAttachmentLimits.maxCount)
         .accessibilityLabel(draft.isLoading ? "Loading attachments" : "Attach files or photos")

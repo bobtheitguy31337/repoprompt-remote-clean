@@ -191,13 +191,7 @@ struct RemoteChatView: View {
                 guard isNearBottom else { return }
                 proxy.scrollTo("transcript-bottom", anchor: .bottom)
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                RemoteChatComposer(
-                    workspaceID: workspaceID,
-                    destination: .session(sessionID, runState)
-                )
-                .environmentObject(model)
-            }
+            .remoteChatComposer(workspaceID: workspaceID, destination: .session(sessionID, runState))
             .task(id: sessionID) {
                 didInitialScroll = false
                 isNearBottom = true
@@ -848,6 +842,14 @@ private struct RemoteToolDetails: View {
     }
 }
 
+extension View {
+    func remoteChatComposer(workspaceID: String, destination: RemoteChatComposer.Destination) -> some View {
+        safeAreaInset(edge: .bottom, spacing: 0) {
+            RemoteChatComposer(workspaceID: workspaceID, destination: destination)
+        }
+    }
+}
+
 struct RemoteChatComposer: View {
     enum Destination {
         case newChat(workflowID: String?)
@@ -858,12 +860,15 @@ struct RemoteChatComposer: View {
     let workspaceID: String
     let destination: Destination
 
+    @FocusState private var isInputFocused: Bool
     @State private var message = ""
     @StateObject private var attachments = RemoteAttachmentDraft()
-    @State private var pendingCommandID: UUID?
+    @State private var pendingSend: (id: UUID, draft: String)?
     @State private var pendingCancelID: UUID?
     @State private var pendingConfigurationID: UUID?
     @State private var draftSelection: RemoteAgentSelection?
+
+    private var pendingCommandID: UUID? { pendingSend?.id }
 
     private var sessionID: UUID? {
         guard case let .session(id, _) = destination else { return nil }
@@ -892,21 +897,28 @@ struct RemoteChatComposer: View {
             && pendingConfigurationID == nil
     }
 
+    private var savedConfiguration: RemoteChatConfiguration? {
+        sessionID.flatMap { model.transcriptTimelinesBySessionID[$0]?.chatConfiguration }
+    }
+
     private var configurationControls: RemoteSessionConfigurationControls? {
         guard model.agentCatalogMetadata?.supportsSessionConfiguration == true else { return nil }
-        return session?.configurationControls
+        if let controls = session?.configurationControls { return controls }
+        guard let savedConfiguration,
+              savedConfiguration.selection.agentID == selection?.agentID,
+              savedConfiguration.selection.modelID == selection?.modelID
+        else { return nil }
+        return savedConfiguration.controls
     }
 
-    private var showsSelection: Bool {
-        if sessionID != nil {
-            return configurationControls != nil && session?.agent != nil && session?.model != nil
+    private var selection: RemoteAgentSelection? {
+        if let sessionID {
+            if let override = model.selectionOverridesBySessionID[sessionID] { return override }
+            if let session, let agent = session.agent, let model = session.model {
+                return RemoteAgentSelection(agentID: agent, modelID: model, reasoningEffort: session.reasoningEffort)
+            }
+            return savedConfiguration?.selection
         }
-        return model.agentCatalogMetadata?.supportsStartSelection == true
-            && model.agentCatalog.contains { $0.isAvailable && $0.modelDescriptors?.contains(where: \.isAvailable) == true }
-    }
-
-    private var launchSelection: RemoteAgentSelection? {
-        guard sessionID == nil, showsSelection else { return nil }
         return RemoteLaunchSelection.resolve(
             draft: draftSelection,
             desktopDefault: model.agentCatalogMetadata?.defaultSelection,
@@ -915,74 +927,82 @@ struct RemoteChatComposer: View {
     }
 
     var body: some View {
-        RemoteComposerSurface {
-            VStack(spacing: 0) {
-                if policy.isInteractionBlocking {
-                    Label("Respond to the request above", systemImage: "arrow.up")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 12)
-                        .padding(.top, 10)
-                }
-
-                RemoteAttachmentDraftStrip(draft: attachments, isSending: pendingCommandID != nil)
-                HStack(alignment: .center, spacing: 8) {
-                    if policy.canAttach, model.agentCatalogMetadata?.supportsAttachments == true {
-                        RemoteAttachmentPicker(
-                            draft: attachments,
-                            isEnabled: model.canSendAttachments && pendingCommandID == nil,
-                            onError: model.presentError
-                        )
-                    }
-                    TextField(placeholder, text: $message, axis: .vertical)
-                        .lineLimit(1...6)
-                        .textFieldStyle(.plain)
-                        .font(.body)
-                        .multilineTextAlignment(.leading)
-                        .padding(.vertical, 10)
-                        .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
-                        .submitLabel(.send)
-                        .onSubmit(send)
-                        .disabled(!model.canControlChat || policy.primaryOperation == nil || pendingCommandID != nil)
-
-                    if let sessionID, policy.canCancel && model.canControlChat {
-                        Button {
-                            guard pendingCancelID == nil else { return }
-                            pendingCancelID = model.cancel(sessionID: sessionID, workspaceID: workspaceID)
-                        } label: {
-                            Image(systemName: "stop.fill")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(Color.red)
-                                .frame(width: 36, height: 36)
-                                .background(Color.red.opacity(0.12), in: Circle())
-                                .overlay {
-                                    Circle().stroke(Color.red.opacity(0.24), lineWidth: 1)
-                                }
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(pendingCancelID != nil)
-                        .accessibilityLabel("Cancel run")
-                    }
-
-                    RemoteComposerSendButton(title: "Send", isEnabled: canSend, action: send)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 4)
-
-                if showsSelection {
-                    Divider()
-                    selectionBar
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                }
+        VStack(alignment: .leading, spacing: 0) {
+            if policy.isInteractionBlocking {
+                Label("Respond to the request above", systemImage: "arrow.up")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 11)
+                    .padding(.top, 8)
             }
+
+            RemoteAttachmentDraftStrip(draft: attachments, isSending: pendingCommandID != nil)
+
+            TextField(placeholder, text: $message, axis: .vertical)
+                .lineLimit(1...7)
+                .textFieldStyle(.plain)
+                .font(.body)
+                .multilineTextAlignment(.leading)
+                .focused($isInputFocused)
+                .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                .padding(.horizontal, 11)
+                .padding(.top, 4)
+                .submitLabel(.send)
+                .onSubmit(send)
+                .disabled(!model.canControlChat || policy.primaryOperation == nil)
+
+            HStack(spacing: 5) {
+                RemoteAttachmentPicker(
+                    draft: attachments,
+                    isEnabled: policy.canAttach && model.canSendAttachments && pendingCommandID == nil,
+                    onError: model.presentError
+                )
+
+                selectionBar
+
+                Spacer(minLength: 0)
+
+                if let sessionID, policy.canCancel && model.canControlChat {
+                    Button {
+                        guard pendingCancelID == nil else { return }
+                        pendingCancelID = model.cancel(sessionID: sessionID, workspaceID: workspaceID)
+                    } label: {
+                        Image(systemName: "stop.fill")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.red)
+                            .frame(width: 30, height: 34)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(pendingCancelID != nil)
+                    .accessibilityLabel("Cancel run")
+                }
+
+                Button(action: send) {
+                    Image(systemName: "arrow.up")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(canSend ? Color.black : Color.secondary)
+                        .frame(width: 36, height: 36)
+                        .background(canSend ? Color.remoteWarmOrange : Color.primary.opacity(0.09), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .accessibilityLabel(policy.canCancel ? policy.primaryLabel : "Send")
+            }
+            .padding(.horizontal, 5)
+            .padding(.bottom, 4)
         }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 15))
+        .overlay {
+            RoundedRectangle(cornerRadius: 15).strokeBorder(.quaternary, lineWidth: 1)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 3)
+        .background(Color.remoteChatBackground, ignoresSafeAreaEdges: .bottom)
         .onChange(of: model.commandActivity) { _, activity in
-            if let completion = activity.completion(for: pendingCommandID) {
-                pendingCommandID = nil
+            if let pendingSend, let completion = activity.completion(for: pendingSend.id) {
+                self.pendingSend = nil
                 if completion.outcome == .accepted {
-                    message = ""
+                    if message == pendingSend.draft { message = "" }
                     attachments.clear()
                 }
             }
@@ -993,20 +1013,24 @@ struct RemoteChatComposer: View {
 
     private var selectionBar: some View {
         let controls = configurationControls
+        let selection = self.selection
+        let supported = sessionID == nil && model.agentCatalogMetadata?.supportsStartSelection == true
+        let locksSession = sessionID != nil && policy.canCancel
         let isPending = pendingCommandID != nil || pendingConfigurationID != nil
+        let toolCatalog = model.agentCatalogMetadata?.toolCatalog
         return RemoteAgentSelectionBar(
             agents: model.agentCatalog,
-            selectedAgentID: session?.agent ?? launchSelection?.agentID,
-            selectedModelID: session?.model ?? launchSelection?.modelID,
-            selectedReasoningEffortID: session?.reasoningEffort ?? launchSelection?.reasoningEffort,
+            selectedAgentID: selection?.agentID,
+            selectedModelID: selection?.modelID,
+            selectedReasoningEffortID: selection?.reasoningEffort,
             allowedAgentIDs: controls.map { Set($0.agent.allowedValueIDs) },
             allowedModelIDs: controls.map { Set($0.model.allowedValueIDs) },
             allowedReasoningEffortIDs: controls.map { Set($0.reasoningEffort.allowedValueIDs) },
-            allowsAgentSwitch: sessionID == nil || controls?.agent.isMutable == true,
-            isModelMutable: model.canControlChat && (controls?.model.isMutable ?? true),
-            isEffortMutable: model.canControlChat && (controls?.reasoningEffort.isMutable ?? true),
+            allowsAgentSwitch: supported || controls?.agent.isMutable == true,
+            isModelMutable: model.canControlChat && !locksSession && (controls?.model.isMutable ?? supported),
+            isEffortMutable: model.canControlChat && !locksSession && (controls?.reasoningEffort.isMutable ?? supported),
             isPending: isPending,
-            toolCatalog: model.agentCatalogMetadata?.toolCatalog,
+            toolCatalog: toolCatalog?.providerID == selection?.agentID ? toolCatalog : nil,
             canEditTools: model.canControlChat,
             onSelectModel: configureModel,
             onSelectReasoningEffort: configureReasoningEffort,
@@ -1035,11 +1059,14 @@ struct RemoteChatComposer: View {
 
     private func send() {
         guard canSend else { return }
-        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let draft = message
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        isInputFocused = false
+        let commandID: UUID
         switch destination {
         case let .newChat(workflowID):
-            let selection = launchSelection
-            pendingCommandID = model.startRun(
+            let selection = model.agentCatalogMetadata?.supportsStartSelection == true ? self.selection : nil
+            commandID = model.startRun(
                 in: workspaceID,
                 message: trimmed,
                 workflowID: workflowID,
@@ -1049,7 +1076,7 @@ struct RemoteChatComposer: View {
                 attachments: attachments.files
             )
         case let .session(sessionID, runState):
-            pendingCommandID = model.continueChat(
+            commandID = model.continueChat(
                 sessionID: sessionID,
                 workspaceID: workspaceID,
                 message: trimmed,
@@ -1057,6 +1084,7 @@ struct RemoteChatComposer: View {
                 attachments: attachments.files
             )
         }
+        pendingSend = (commandID, draft)
     }
 
     private func configureModel(agentID: String, modelID: String) {
@@ -1081,12 +1109,222 @@ struct RemoteChatComposer: View {
                 workspaceID: workspaceID,
                 reasoningEffort: reasoningEffortID
             )
-        } else if let selection = launchSelection {
+        } else if let selection {
             draftSelection = RemoteAgentSelection(
                 agentID: selection.agentID,
                 modelID: selection.modelID,
                 reasoningEffort: reasoningEffortID
             )
+        }
+    }
+}
+
+private struct RemoteAgentSelectionBar: View {
+    let agents: [RemoteAgentDescriptor]
+    let selectedAgentID: String?
+    let selectedModelID: String?
+    let selectedReasoningEffortID: String?
+    let allowedAgentIDs: Set<String>?
+    let allowedModelIDs: Set<String>?
+    let allowedReasoningEffortIDs: Set<String>?
+    let allowsAgentSwitch: Bool
+    let isModelMutable: Bool
+    let isEffortMutable: Bool
+    let isPending: Bool
+    let toolCatalog: RemoteToolCatalog?
+    let canEditTools: Bool
+    let onSelectModel: (_ agentID: String, _ modelID: String) -> Void
+    let onSelectReasoningEffort: (_ reasoningEffortID: String) -> Void
+    let onToggleTool: (_ setting: RemoteToolSettingDescriptor, _ revision: Int) -> Void
+
+    @State private var showsModelPicker = false
+    private var selectedModel: RemoteModelDescriptor? {
+        agents.first(where: { $0.id == selectedAgentID })?.modelDescriptors?.first(where: { $0.id == selectedModelID })
+    }
+
+    private var hasSelectableModel: Bool {
+        agents.contains { agent in
+            agent.isAvailable && agent.modelDescriptors?.contains {
+                $0.isAvailable && canSelectModel($0.id, for: agent.id)
+            } == true
+        }
+    }
+
+    private var effortOptions: [RemoteReasoningEffortDescriptor] {
+        selectedModel?.reasoningEfforts ?? []
+    }
+
+    private func canSelectModel(_ modelID: String, for agentID: String) -> Bool {
+        isModelMutable && !isPending
+            && (allowsAgentSwitch || agentID == selectedAgentID)
+            && (allowedAgentIDs?.contains(agentID) ?? true)
+            && (agentID != selectedAgentID || (allowedModelIDs?.contains(modelID) ?? true))
+    }
+
+    private func canSelectEffort(_ effortID: String) -> Bool {
+        isEffortMutable && !isPending && (allowedReasoningEffortIDs?.contains(effortID) ?? true)
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button {
+                showsModelPicker = true
+            } label: {
+                HStack(spacing: 5) {
+                    Text(modelLabel)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7)
+                .frame(minHeight: 28)
+                .background(Color.primary.opacity(0.08), in: Capsule())
+            }
+            .accessibilityLabel("Model")
+            .accessibilityValue(modelLabel)
+            .disabled(!hasSelectableModel)
+            .sheet(isPresented: $showsModelPicker) {
+                NavigationStack {
+                    List {
+                        ForEach(agents.filter(\.isAvailable), id: \.id) { agent in
+                            Section(agent.displayName) {
+                                ForEach((agent.modelDescriptors ?? []).filter(\.isAvailable), id: \.id) { candidate in
+                                    Button {
+                                        onSelectModel(agent.id, candidate.id)
+                                        showsModelPicker = false
+                                    } label: {
+                                        HStack {
+                                            Text(RemoteLaunchSelection.modelLabel(candidate.displayName))
+                                            Spacer()
+                                            if agent.id == selectedAgentID,
+                                               candidate.id == selectedModelID
+                                            {
+                                                Image(systemName: "checkmark")
+                                            }
+                                        }
+                                    }
+                                    .disabled(!canSelectModel(candidate.id, for: agent.id))
+                                }
+                            }
+                        }
+                    }
+                    .navigationTitle("Model")
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { showsModelPicker = false }
+                        }
+                    }
+                }
+                .presentationDetents([.medium, .large])
+            }
+
+            Menu {
+                ForEach(effortOptions, id: \.id) { effort in
+                    Button {
+                        onSelectReasoningEffort(effort.id)
+                    } label: {
+                        HStack {
+                            Text(effort.displayName)
+                            if effort.id == selectedReasoningEffortID {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                    .disabled(!canSelectEffort(effort.id))
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(effortLabel)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7)
+                .frame(minHeight: 28)
+                .background(Color.primary.opacity(0.08), in: Capsule())
+            }
+            .accessibilityLabel("Reasoning level")
+            .accessibilityValue(effortLabel)
+            .disabled(!effortOptions.contains { canSelectEffort($0.id) })
+
+            RemoteToolsButton(catalog: toolCatalog, isPending: isPending, canEdit: canEditTools, onToggle: onToggleTool)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var modelLabel: String {
+        RemoteLaunchSelection.modelLabel(selectedModel?.displayName ?? selectedModelID ?? "Model")
+    }
+
+    private var effortLabel: String {
+        effortOptions.first(where: { $0.id == selectedReasoningEffortID })?.displayName
+            ?? selectedReasoningEffortID?.capitalized
+            ?? "Reasoning"
+    }
+}
+
+private struct RemoteToolsButton: View {
+    let catalog: RemoteToolCatalog?
+    let isPending: Bool
+    let canEdit: Bool
+    let onToggle: (RemoteToolSettingDescriptor, Int) -> Void
+    @State private var presentedCatalog: RemoteToolCatalog?
+
+    var body: some View {
+        Button {
+            presentedCatalog = catalog
+        } label: {
+            HStack(spacing: 4) {
+                Text("Tools")
+                Image(systemName: "chevron.down").font(.caption2.weight(.semibold))
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .frame(minHeight: 28)
+            .background(Color.primary.opacity(0.08), in: Capsule())
+        }
+        .disabled(isPending || catalog == nil)
+        .sheet(isPresented: Binding(
+            get: { presentedCatalog != nil },
+            set: { if !$0 { presentedCatalog = nil } }
+        )) {
+            if let snapshot = presentedCatalog {
+                NavigationStack {
+                    Form {
+                        ForEach(["tools", "mcp_servers"], id: \.self) { category in
+                            let settings = snapshot.settings.filter { $0.category == category }
+                            if !settings.isEmpty {
+                                Section(category == "tools" ? "Tools" : "MCP Servers") {
+                                    ForEach(settings) { setting in
+                                        Toggle(setting.displayName, isOn: Binding(
+                                            get: { setting.isEnabled },
+                                            set: { enabled in
+                                                onToggle(setting, snapshot.revision)
+                                                presentedCatalog = nil
+                                            }
+                                        ))
+                                        .disabled(!canEdit || !snapshot.isMutable || !setting.isMutable || setting.isRequired)
+                                    }
+                                }
+                            }
+                        }
+                        if let reason = snapshot.unavailableReason {
+                            Text(reason).font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    .navigationTitle("Codex Tools")
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { presentedCatalog = nil }
+                        }
+                    }
+                }
+                .presentationDetents([.medium, .large])
+            }
         }
     }
 }

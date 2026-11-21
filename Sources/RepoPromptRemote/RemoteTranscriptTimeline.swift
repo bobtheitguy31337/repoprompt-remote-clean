@@ -24,6 +24,7 @@ struct RemoteTranscriptTimelineState: Equatable {
     private(set) var pagingMode: RemoteTranscriptPagingMode?
     private(set) var loadedRevision: UInt64?
     private(set) var loadedRevisionEpoch: UUID?
+    private(set) var chatConfiguration: RemoteChatConfiguration?
     private(set) var initialLoadState: RemoteTranscriptLoadState = .idle
     private(set) var latestRefreshState: RemoteTranscriptLoadState = .idle
     private(set) var olderPageState: RemoteTranscriptLoadState = .idle
@@ -69,6 +70,9 @@ struct RemoteTranscriptTimelineState: Equatable {
     ) -> Bool {
         guard generationIsCurrent(generation, for: kind) else { return false }
 
+        if kind != .older, let configuration = page.chatConfiguration {
+            chatConfiguration = configuration
+        }
         let pageMode = page.pagingMode ?? .legacyForward
         let sortedPageItems = Self.sorted(page.items)
         let hadItems = !orderedItems.isEmpty
@@ -158,6 +162,7 @@ struct RemoteTranscriptTimelineState: Equatable {
     mutating func resetRevisionEpoch() {
         loadedRevision = nil
         loadedRevisionEpoch = nil
+        chatConfiguration = nil
     }
 
     private mutating func merge(_ items: [RemoteTranscriptItem]) {

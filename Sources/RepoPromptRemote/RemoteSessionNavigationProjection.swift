@@ -268,12 +268,9 @@ enum RemoteSessionNavigationProjection {
         return rows
     }
 
-    static func stableSelectionID(
-        current: UUID?,
-        rows: [RemoteSessionNavigationRow]
-    ) -> UUID? {
-        guard let current, rows.contains(where: { $0.id == current }) else { return nil }
-        return current
+    static func selectionID(current: UUID?, chatIDs: [UUID], allowsInitialSelection: Bool) -> UUID? {
+        if let current, chatIDs.contains(current) { return current }
+        return allowsInitialSelection ? chatIDs.first : nil
     }
 
     private static func deduplicate(_ items: [RemoteChatListItem]) -> [RemoteChatListItem] {

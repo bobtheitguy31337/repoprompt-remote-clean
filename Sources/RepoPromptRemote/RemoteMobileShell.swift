@@ -9,6 +9,7 @@ struct RemoteMobileShell: View {
     @State private var drawerIsOpen = false
     @State private var selectedWorkspaceID: String?
     @State private var selectedSessionID: UUID?
+    @State private var allowsInitialChatSelection = true
     @State private var showingWorkflowLaunch = false
     @State private var showingSettings = false
     @State private var showingChatDetails = false
@@ -69,6 +70,8 @@ struct RemoteMobileShell: View {
                         MobileProjectEmptyView(
                             workspaceName: selectedWorkspace?.name,
                             historyPhase: history?.phase,
+                            hasChats: !chats.isEmpty,
+                            onShowChats: openDrawer,
                             onRetry: model.refreshChatList,
                             onNewSession: openWorkflowLaunch
                         )
@@ -78,9 +81,7 @@ struct RemoteMobileShell: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
-                        Button {
-                            withAnimation(.easeOut(duration: 0.22)) { drawerIsOpen = true }
-                        } label: {
+                        Button(action: openDrawer) {
                             Image(systemName: "line.3.horizontal")
                                 .font(.body.weight(.semibold))
                         }
@@ -184,6 +185,7 @@ struct RemoteMobileShell: View {
               let workspaceID = model.workspaceID(forPendingSessionID: pendingID)
         else { return }
         showingWorkflowLaunch = false
+        allowsInitialChatSelection = false
         selectedWorkspaceID = workspaceID
         selectedSessionID = pendingID
         model.setVisibleSessionID(pendingID)
@@ -195,22 +197,28 @@ struct RemoteMobileShell: View {
         let workspace = selectedWorkspace ?? preferredWorkspace
         selectedWorkspaceID = workspace?.workspaceID
         let availableChats = workspace.map { model.chatList(for: $0.workspaceID) } ?? []
-        if let selectedSessionID, availableChats.contains(where: { $0.id == selectedSessionID }) { return }
-        if !showingWorkflowLaunch { selectedSessionID = availableChats.first?.id }
+        selectedSessionID = RemoteSessionNavigationProjection.selectionID(
+            current: selectedSessionID,
+            chatIDs: availableChats.map(\.id),
+            allowsInitialSelection: allowsInitialChatSelection && !drawerIsOpen && !showingWorkflowLaunch
+        )
+        if selectedSessionID != nil { allowsInitialChatSelection = false }
     }
 
     private func selectWorkspace(_ workspaceID: String) {
         if selectedWorkspace?.workspaceID == workspaceID {
             model.refreshChatList()
+            return
         }
+        allowsInitialChatSelection = false
         selectedWorkspaceID = workspaceID
         showingWorkflowLaunch = false
-        selectedSessionID = model.chatList(for: workspaceID).first?.id
-        model.setVisibleSessionID(selectedSessionID)
-        closeDrawer()
+        selectedSessionID = nil
+        model.setVisibleSessionID(nil)
     }
 
     private func selectChat(_ chat: RemoteChatListItem) {
+        allowsInitialChatSelection = false
         selectedWorkspaceID = chat.workspaceID
         selectedSessionID = chat.id
         showingWorkflowLaunch = false
@@ -232,6 +240,10 @@ struct RemoteMobileShell: View {
     private func closeWorkflowLaunch() {
         showingWorkflowLaunch = false
         model.setVisibleSessionID(selectedSessionID)
+    }
+
+    private func openDrawer() {
+        withAnimation(.easeOut(duration: 0.22)) { drawerIsOpen = true }
     }
 
     private func closeDrawer() {
@@ -276,11 +288,13 @@ private struct MobileProvisionalSessionView: View {
 private struct MobileProjectEmptyView: View {
     let workspaceName: String?
     let historyPhase: RemoteWorkspaceHistory.Phase?
+    let hasChats: Bool
+    let onShowChats: () -> Void
     let onRetry: () -> Void
     let onNewSession: () -> Void
 
     var body: some View {
-        if workspaceName != nil, historyPhase == nil || historyPhase == .loading {
+        if !hasChats, workspaceName != nil, historyPhase == nil || historyPhase == .loading {
             ProgressView("Loading saved chats…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -289,7 +303,9 @@ private struct MobileProjectEmptyView: View {
             } description: {
                 Text(description)
             } actions: {
-                if historyPhase == .failed {
+                if hasChats {
+                    Button("Show chats", action: onShowChats).buttonStyle(.borderedProminent)
+                } else if historyPhase == .failed {
                     Button("Retry", action: onRetry).buttonStyle(.borderedProminent)
                 } else if workspaceName != nil {
                     Button("New session", action: onNewSession).buttonStyle(.borderedProminent)
@@ -300,6 +316,7 @@ private struct MobileProjectEmptyView: View {
 
     private var description: String {
         guard workspaceName != nil else { return "Pair with your Mac to load projects and chats." }
+        if hasChats { return "Choose a chat to continue." }
         switch historyPhase {
         case .failed?: return "The Mac could not load this project’s saved chats."
         case .limited?: return "Update RepoPrompt on the Mac to see all saved chats."
@@ -372,6 +389,7 @@ private struct RemoteNavigationDrawer: View {
                     historyFooter
                 }
             }
+            .id(selectedWorkspace?.workspaceID)
 
             Spacer(minLength: 16)
             connectionFooter
