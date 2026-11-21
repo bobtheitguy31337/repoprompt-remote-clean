@@ -1,0 +1,74 @@
+name: RepoPrompt Remote iOS Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+      PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_PROVISIONING_PROFILE_SPECIFIER }}
+      CODE_SIGN_IDENTITY: Apple Distribution
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Validate signing inputs
+        run: |
+          test -n "$DEVELOPMENT_TEAM"
+          test -n "$PROVISIONING_PROFILE_SPECIFIER"
+
+      - name: Archive signed iOS app
+        run: >-
+          xcodebuild archive
+          -project RepoPromptRemote.xcodeproj
+          -scheme RepoPromptRemote
+          -configuration Release
+          -destination 'generic/platform=iOS'
+          -archivePath "$RUNNER_TEMP/RepoPromptRemote.xcarchive"
+          CODE_SIGN_STYLE=Manual
+          DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM"
+          CODE_SIGN_IDENTITY="$CODE_SIGN_IDENTITY"
+          PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_SPECIFIER"
+
+      - name: Export archive
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>teamID</key>
+            <string>${DEVELOPMENT_TEAM}</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>com.repoprompt.remote</key>
+              <string>${PROVISIONING_PROFILE_SPECIFIER}</string>
+            </dict>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/RepoPromptRemote.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/exported"
+
+      - name: Upload signed archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: RepoPromptRemote-iOS
+          path: ${{ runner.temp }}/exported

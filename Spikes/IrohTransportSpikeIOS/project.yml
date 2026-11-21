@@ -1,0 +1,41 @@
+name: IrohTransportSpike
+options:
+  bundleIdPrefix: com.repoprompt.remote
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  RepoPromptIrohTransport:
+    path: ../../Packages/RepoPromptIrohTransport
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: ""
+targets:
+  IrohTransportSpike:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: IrohTransportSpikeApp.swift
+      - path: IrohSpikeModel.swift
+      - path: ContentView.swift
+    dependencies:
+      - package: RepoPromptIrohTransport
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Iroh Spike
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSLocalNetworkUsageDescription: Validate direct opaque Iroh echo transport on a local network.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.repoprompt.remote.iroh-spike
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"

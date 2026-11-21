@@ -1,0 +1,18 @@
+import SwiftUI
+
+@main
+struct RepoPromptRemoteApp: App {
+    @StateObject private var model = RemoteAppModel()
+    @UIApplicationDelegateAdaptor(RemoteNotificationDelegate.self) private var notificationDelegate
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environmentObject(model)
+                .onChange(of: scenePhase) { _, phase in
+                    model.setSceneActive(phase == .active)
+                }
+        }
+    }
+}

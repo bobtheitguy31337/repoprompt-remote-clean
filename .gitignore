@@ -1,0 +1,30 @@
+.DS_Store
+build/
+DerivedData/
+.build/
+*.xcuserstate
+xcuserdata/
+
+# Generated Iroh transport spike outputs. Recreate with the package build script/XcodeGen.
+Packages/RepoPromptIrohTransport/Artifacts/
+Packages/RepoPromptIrohTransport/.swiftpm/
+Packages/RepoPromptIrohTransport/rust/target/
+Spikes/IrohTransportSpikeIOS/Info.plist
+Spikes/IrohTransportSpikeIOS/IrohTransportSpike.xcodeproj/
+
+# Local exports and Apple signing material
+/prompt-exports/
+.env
+.env.*
+!.env.example
+*.p8
+*.pem
+*.key
+*.cer
+*.local.xcconfig
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+*.xcarchive/
+*.ipa

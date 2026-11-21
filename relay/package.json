@@ -1,0 +1,12 @@
+{
+  "name": "repoprompt-remote-relay",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test server.test.mjs",
+    "start": "node server.mjs"
+  }
+}

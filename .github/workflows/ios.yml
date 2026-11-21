@@ -1,0 +1,135 @@
+name: RepoPrompt Remote iOS
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  protocol:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read tested desktop repository and revision
+        id: desktop
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, re
+          with open("desktop-compatibility.json") as manifest:
+              compatibility = json.load(manifest)
+          repository = compatibility["desktop_repository"]
+          revision = compatibility["desktop_revision"]
+          assert re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository), "Expected a GitHub repository name"
+          assert re.fullmatch(r"[0-9a-f]{40}", revision), "Expected a full desktop commit SHA"
+          print(f"repository={repository}")
+          print(f"revision={revision}")
+          PY
+      - name: Check out the desktop Remote contract
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.desktop.outputs.repository }}
+          ref: ${{ steps.desktop.outputs.revision }}
+          path: .desktop-contract
+          persist-credentials: false
+          sparse-checkout: |
+            Sources/RepoPromptRemoteProtocol
+            Tests/RepoPromptRemoteProtocolTests/Fixtures
+      - name: Check desktop and iOS contract parity
+        run: python3 Scripts/check-desktop-compatibility.py .desktop-contract
+      - name: Test shared protocol
+        run: swift test --package-path Packages/RepoPromptRemoteProtocol
+
+  iroh-transport-spike:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      REPOPROMPT_IROH_USE_LOCAL_ARTIFACT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: clippy,rustfmt
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path Packages/RepoPromptIrohTransport/rust/Cargo.toml --check
+      - name: Lint locked Rust bridge
+        run: cargo clippy --locked --manifest-path Packages/RepoPromptIrohTransport/rust/Cargo.toml --all-targets --all-features -- -D warnings
+      - name: Test locked Rust bridge
+        run: cargo test --locked --manifest-path Packages/RepoPromptIrohTransport/rust/Cargo.toml
+      - name: Rebuild and verify Apple XCFramework
+        run: Packages/RepoPromptIrohTransport/Scripts/build-xcframework.sh --locked
+      - name: Verify committed Swift binding is current
+        run: >-
+          git diff --exit-code --
+          Packages/RepoPromptIrohTransport/Sources/RepoPromptIrohTransport/IrohTransportBindings.swift
+      - name: Test Swift bridge
+        run: swift test --package-path Packages/RepoPromptIrohTransport
+      - name: Upload generated Iroh XCFramework
+        uses: actions/upload-artifact@v7
+        with:
+          name: iroh-transport-xcframework
+          path: Packages/RepoPromptIrohTransport/Artifacts/IrohTransportFFI.xcframework
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  relay:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test notification relay
+        run: npm test
+
+  simulator:
+    needs: iroh-transport-spike
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      REPOPROMPT_IROH_USE_LOCAL_ARTIFACT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download generated Iroh XCFramework
+        uses: actions/download-artifact@v8
+        with:
+          name: iroh-transport-xcframework
+          path: Packages/RepoPromptIrohTransport/Artifacts/IrohTransportFFI.xcframework
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Select an available iOS simulator
+        id: simulator
+        run: |
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/simulators.json"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "simulators.json")) as source:
+              devices = json.load(source)["devices"]
+          simulator = next(
+              device
+              for runtime, candidates in devices.items() if ".iOS-" in runtime
+              for device in candidates
+              if device["isAvailable"] and device["name"].startswith("iPhone")
+          )
+          print(f"udid={simulator['udid']}")
+          PY
+      - name: Test iOS simulator app
+        run: >-
+          xcodebuild -project RepoPromptRemote.xcodeproj
+          -scheme RepoPromptRemote
+          -sdk iphonesimulator
+          -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}'
+          CODE_SIGNING_ALLOWED=NO test
+      - name: Generate standalone Iroh spike project
+        run: xcodegen generate --spec Spikes/IrohTransportSpikeIOS/project.yml
+      - name: Build Iroh transport simulator spike
+        run: >-
+          xcodebuild -project Spikes/IrohTransportSpikeIOS/IrohTransportSpike.xcodeproj
+          -scheme IrohTransportSpike
+          -sdk iphonesimulator
+          -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO build

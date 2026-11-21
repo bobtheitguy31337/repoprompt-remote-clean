@@ -1,0 +1,68 @@
+name: RepoPromptRemote
+options:
+  bundleIdPrefix: com.repoprompt
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  RepoPromptRemoteProtocol:
+    path: Packages/RepoPromptRemoteProtocol
+  RepoPromptIrohTransport:
+    path: Packages/RepoPromptIrohTransport
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""
+targets:
+  RepoPromptRemote:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    info:
+      path: Sources/RepoPromptRemote/Info.plist
+      properties:
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "0.1.0"
+        NSBonjourServices:
+          - _repoprompt-remote._tcp
+        NSCameraUsageDescription: Scan a RepoPrompt pairing code shown on your Mac.
+        NSLocalNetworkUsageDescription: Discover and connect to RepoPrompt on your local network.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: false
+        UIStatusBarStyle: UIStatusBarStyleDarkContent
+        UILaunchScreen: {}
+    sources:
+      - path: Sources/RepoPromptRemote
+    resources:
+      - path: Sources/RepoPromptRemote/Assets.xcassets
+    dependencies:
+      - package: RepoPromptRemoteProtocol
+      - package: RepoPromptIrohTransport
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Sources/RepoPromptRemote/RepoPromptRemote.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: com.repoprompt.remote
+        INFOPLIST_KEY_CFBundleDisplayName: RepoPrompt Remote
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "0.1.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+      configs:
+        Release:
+          CODE_SIGN_ENTITLEMENTS: Sources/RepoPromptRemote/RepoPromptRemote.Release.entitlements
+  RepoPromptRemoteTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Tests/RepoPromptRemoteTests
+    dependencies:
+      - target: RepoPromptRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.repoprompt.remote.tests
+        GENERATE_INFOPLIST_FILE: YES
