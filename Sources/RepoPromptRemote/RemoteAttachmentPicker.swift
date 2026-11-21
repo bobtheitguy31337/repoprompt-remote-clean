@@ -185,12 +185,11 @@ struct RemoteAttachmentDraftStrip: View {
     let isSending: Bool
 
     var body: some View {
-        if !draft.files.isEmpty {
+        VStack(alignment: .leading, spacing: 6) {
             if isSending {
                 ProgressView("Sending attachments…")
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding([.top, .horizontal], 10)
             }
             ScrollView(.horizontal) {
                 HStack(spacing: 8) {
@@ -217,10 +216,8 @@ struct RemoteAttachmentDraftStrip: View {
                         .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
-                .padding(.horizontal, 10)
             }
             .scrollIndicators(.hidden)
-            .padding(.top, 8)
             .disabled(isSending)
         }
     }

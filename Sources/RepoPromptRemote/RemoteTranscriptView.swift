@@ -1087,16 +1087,16 @@ struct RemoteChatComposer: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 8) {
             if policy.isInteractionBlocking {
                 Label("Respond to the request above", systemImage: "arrow.up")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 11)
-                    .padding(.top, 8)
             }
 
-            RemoteAttachmentDraftStrip(draft: attachments, isSending: pendingCommandID != nil)
+            if !attachments.files.isEmpty {
+                RemoteAttachmentDraftStrip(draft: attachments, isSending: pendingCommandID != nil)
+            }
 
             TextField("Send a Message...", text: $message, axis: .vertical)
                 .lineLimit(1...7)
@@ -1104,9 +1104,7 @@ struct RemoteChatComposer: View {
                 .font(.body)
                 .multilineTextAlignment(.leading)
                 .focused($isInputFocused)
-                .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-                .padding(.horizontal, 11)
-                .padding(.top, 4)
+                .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
                 .submitLabel(.send)
                 .onSubmit(send)
                 .disabled(!model.canControlChat || policy.primaryOperation == nil)
@@ -1149,9 +1147,8 @@ struct RemoteChatComposer: View {
                 .disabled(!canSend)
                 .accessibilityLabel(policy.canCancel ? policy.primaryLabel : "Send")
             }
-            .padding(.horizontal, 5)
-            .padding(.bottom, 4)
         }
+        .padding(10)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 15))
         .overlay {
             RoundedRectangle(cornerRadius: 15).strokeBorder(.quaternary, lineWidth: 1)
