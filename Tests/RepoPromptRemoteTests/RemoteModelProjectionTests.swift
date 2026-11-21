@@ -694,7 +694,85 @@ final class RemoteWorkflowLaunchPolicyTests: XCTestCase {
     }
 }
 
+final class RemoteWorkspaceHistoryTests: XCTestCase {
+    func testLoadsAllScopedPagesAndKeepsOneCopyPerSession() async throws {
+        let workspaceID = UUID()
+        let newer = entry(in: workspaceID, time: 3)
+        let older = entry(in: workspaceID, time: 2)
+        let cursor = RemoteHistoryCursor(lastActivityAt: newer.lastActivityAt, sessionID: newer.id)
+        var cursors: [RemoteHistoryCursor?] = []
+
+        let result = try await RemoteWorkspaceHistory.load(workspaceID: workspaceID) { request in
+            XCTAssertEqual(request.workspaceID, workspaceID)
+            cursors.append(request.before)
+            if request.before == nil {
+                return RemoteHistoryPage(entries: [newer], hasMore: true, workspaceID: workspaceID, olderCursor: cursor)
+            }
+            return RemoteHistoryPage(entries: [newer, older], workspaceID: workspaceID)
+        }
+
+        XCTAssertEqual(cursors, [nil, cursor])
+        XCTAssertEqual(result.entries, [newer, older])
+        XCTAssertEqual(result.phase, .loaded)
+    }
+
+    func testLegacyGlobalPageIsFilteredAndReportsWhenItIsIncomplete() async throws {
+        let workspaceID = UUID()
+        let matching = entry(in: workspaceID, time: 1)
+        let other = entry(in: UUID(), time: 2)
+        let result = try await RemoteWorkspaceHistory.load(workspaceID: workspaceID) { _ in
+            RemoteHistoryPage(entries: [other, matching], hasMore: true)
+        }
+        XCTAssertEqual(result.entries, [matching])
+        XCTAssertEqual(result.phase, .limited)
+    }
+
+    func testRepeatedCursorFailsInsteadOfContinuingToFetch() async {
+        let workspaceID = UUID()
+        let item = entry(in: workspaceID, time: 1)
+        let cursor = RemoteHistoryCursor(lastActivityAt: item.lastActivityAt, sessionID: item.id)
+        do {
+            _ = try await RemoteWorkspaceHistory.load(workspaceID: workspaceID) { _ in
+                RemoteHistoryPage(entries: [item], hasMore: true, workspaceID: workspaceID, olderCursor: cursor)
+            }
+            XCTFail("A repeated history cursor must stop the page loop.")
+        } catch RemoteGatewayError.invalidResponse {
+        } catch {
+            XCTFail("Unexpected history failure: \(error)")
+        }
+    }
+
+    private func entry(in workspaceID: UUID, time: TimeInterval) -> RemoteHistoryEntry {
+        RemoteHistoryEntry(
+            id: UUID(), workspaceID: workspaceID.uuidString, sessionName: "Saved chat",
+            lastActivityAt: Date(timeIntervalSinceReferenceDate: time)
+        )
+    }
+}
+
 final class RemoteComposerPolicyTests: XCTestCase {
+    func testNewChatUsesOrdinaryComposerControlsAndRetainsTheResolvedEffort() {
+        XCTAssertEqual(RemoteComposerPolicy.newChat.primaryOperation, .startRun)
+        XCTAssertTrue(RemoteComposerPolicy.newChat.canAttach)
+        XCTAssertFalse(RemoteComposerPolicy.newChat.canCancel)
+
+        let selection = RemoteAgentSelection(agentID: "codex", modelID: "default", reasoningEffort: "high")
+        let model = RemoteModelDescriptor(
+            id: "default", displayName: "Default",
+            reasoningEfforts: [
+                .init(id: "medium", displayName: "Medium"),
+                .init(id: "high", displayName: "High")
+            ],
+            defaultReasoningEffortID: "medium"
+        )
+        let agent = RemoteAgentDescriptor(
+            id: "codex", displayName: "Codex", models: ["default"], isAvailable: true, modelDescriptors: [model]
+        )
+        XCTAssertEqual(RemoteLaunchSelection.resolve(draft: nil, desktopDefault: selection, agents: [agent]), selection)
+        let stale = RemoteAgentSelection(agentID: "old", modelID: "removed")
+        XCTAssertEqual(RemoteLaunchSelection.resolve(draft: stale, desktopDefault: selection, agents: [agent]), selection)
+    }
+
     func testCompleteComposerMatrix() {
         assertPolicy(.opening, operation: .steer, canCancel: true, label: "Steer")
         assertPolicy(.working, operation: .steer, canCancel: true, label: "Steer")

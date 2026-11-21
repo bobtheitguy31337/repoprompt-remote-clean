@@ -6,6 +6,8 @@ struct RemoteComposerPolicy: Equatable {
     let canCancel: Bool
     let isInteractionBlocking: Bool
 
+    static let newChat = Self(primaryOperation: .startRun, primaryLabel: "Send", canCancel: false, isInteractionBlocking: false)
+
     var canAttach: Bool { primaryOperation != nil && !canCancel }
 
     static func resolve(
@@ -52,5 +54,27 @@ struct RemoteComposerPolicy: Equatable {
                 isInteractionBlocking: false
             )
         }
+    }
+}
+
+/// A fresh chat reflects the Mac's default until the user chooses a model or effort.
+enum RemoteLaunchSelection {
+    static func resolve(
+        draft: RemoteAgentSelection?,
+        desktopDefault: RemoteAgentSelection?,
+        agents: [RemoteAgentDescriptor]
+    ) -> RemoteAgentSelection? {
+        for selection in [draft, desktopDefault].compactMap({ $0 }) {
+            guard let agent = agents.first(where: { $0.id == selection.agentID && $0.isAvailable }),
+                  let model = agent.modelDescriptors?.first(where: { $0.id == selection.modelID && $0.isAvailable })
+            else { continue }
+            let requested = model.reasoningEfforts.first { $0.id == selection.reasoningEffort }?.id
+            return RemoteAgentSelection(
+                agentID: agent.id,
+                modelID: model.id,
+                reasoningEffort: requested ?? model.defaultReasoningEffortID
+            )
+        }
+        return nil
     }
 }

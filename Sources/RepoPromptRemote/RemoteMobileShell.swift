@@ -32,6 +32,10 @@ struct RemoteMobileShell: View {
         return model.navigationRows(for: workspaceID, selectedSessionID: selectedSessionID)
     }
 
+    private var history: RemoteWorkspaceHistory? {
+        selectedWorkspace.flatMap { model.workspaceHistory[$0.workspaceID] }
+    }
+
     private var selectedChat: RemoteChatListItem? {
         guard let selectedSessionID else { return nil }
         return chats.first(where: { $0.id == selectedSessionID })
@@ -43,6 +47,7 @@ struct RemoteMobileShell: View {
                 Group {
                     if showingWorkflowLaunch, let workspace = selectedWorkspace {
                         RemoteWorkflowLaunchView(workspace: workspace, onCancel: closeWorkflowLaunch)
+                            .id(workspace.workspaceID)
                             .environmentObject(model)
                     } else if let chat = selectedChat {
                         if chat.isProvisional {
@@ -63,6 +68,8 @@ struct RemoteMobileShell: View {
                     } else {
                         MobileProjectEmptyView(
                             workspaceName: selectedWorkspace?.name,
+                            historyPhase: history?.phase,
+                            onRetry: model.refreshChatList,
                             onNewSession: openWorkflowLaunch
                         )
                     }
@@ -110,6 +117,7 @@ struct RemoteMobileShell: View {
 
                 RemoteNavigationDrawer(
                     selectedWorkspace: selectedWorkspace,
+                    historyPhase: history?.phase,
                     rows: navigationRows,
                     selectedSessionID: selectedSessionID,
                     onSelectWorkspace: selectWorkspace,
@@ -151,7 +159,10 @@ struct RemoteMobileShell: View {
             synchronizeSelection()
             routePendingSessionIfResolvable()
         }
-        .onChange(of: model.chatEntries) { _, _ in
+        .onChange(of: selectedWorkspace?.workspaceID, initial: true) { _, workspaceID in
+            model.selectHistoryWorkspace(workspaceID)
+        }
+        .onChange(of: history?.entries) { _, _ in
             synchronizeSelection()
             routePendingSessionIfResolvable()
         }
@@ -189,6 +200,9 @@ struct RemoteMobileShell: View {
     }
 
     private func selectWorkspace(_ workspaceID: String) {
+        if selectedWorkspace?.workspaceID == workspaceID {
+            model.refreshChatList()
+        }
         selectedWorkspaceID = workspaceID
         showingWorkflowLaunch = false
         selectedSessionID = model.chatList(for: workspaceID).first?.id
@@ -261,17 +275,35 @@ private struct MobileProvisionalSessionView: View {
 
 private struct MobileProjectEmptyView: View {
     let workspaceName: String?
+    let historyPhase: RemoteWorkspaceHistory.Phase?
+    let onRetry: () -> Void
     let onNewSession: () -> Void
 
     var body: some View {
-        ContentUnavailableView {
-            Label(workspaceName ?? "No project selected", systemImage: "bubble.left.and.bubble.right")
-        } description: {
-            Text(workspaceName == nil ? "Pair with your Mac to load projects and chats." : "There are no saved chats in this project yet.")
-        } actions: {
-            if workspaceName != nil {
-                Button("New session", action: onNewSession).buttonStyle(.borderedProminent)
+        if workspaceName != nil, historyPhase == nil || historyPhase == .loading {
+            ProgressView("Loading saved chats…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ContentUnavailableView {
+                Label(workspaceName ?? "No project selected", systemImage: "bubble.left.and.bubble.right")
+            } description: {
+                Text(description)
+            } actions: {
+                if historyPhase == .failed {
+                    Button("Retry", action: onRetry).buttonStyle(.borderedProminent)
+                } else if workspaceName != nil {
+                    Button("New session", action: onNewSession).buttonStyle(.borderedProminent)
+                }
             }
+        }
+    }
+
+    private var description: String {
+        guard workspaceName != nil else { return "Pair with your Mac to load projects and chats." }
+        switch historyPhase {
+        case .failed?: return "The Mac could not load this project’s saved chats."
+        case .limited?: return "Update RepoPrompt on the Mac to see all saved chats."
+        default: return "There are no saved chats in this project yet."
         }
     }
 }
@@ -279,6 +311,7 @@ private struct MobileProjectEmptyView: View {
 private struct RemoteNavigationDrawer: View {
     @EnvironmentObject private var model: RemoteAppModel
     let selectedWorkspace: RemoteWorkspaceSummary?
+    let historyPhase: RemoteWorkspaceHistory.Phase?
     let rows: [RemoteSessionNavigationRow]
     let selectedSessionID: UUID?
     let onSelectWorkspace: (String) -> Void
@@ -328,25 +361,15 @@ private struct RemoteNavigationDrawer: View {
             .padding(.bottom, 6)
 
             ScrollView(showsIndicators: false) {
-                LazyVStack(spacing: 3) {
-                    if rows.isEmpty {
-                        Text("No chats in this project yet.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(12)
-                    } else {
-                        ForEach(rows) { row in
-                            Button { onSelectChat(row.item) } label: {
-                                MobileSessionDrawerRow(
-                                    row: row,
-                                    session: model.sessions.first(where: { $0.id == row.id }),
-                                    isSelected: selectedSessionID == row.id
-                                )
-                            }
-                            .buttonStyle(.plain)
+                LazyVStack(spacing: 1) {
+                    ForEach(rows) { row in
+                        Button { onSelectChat(row.item) } label: {
+                            MobileSessionDrawerRow(row: row, isSelected: selectedSessionID == row.id)
                         }
+                        .buttonStyle(.plain)
                     }
+
+                    historyFooter
                 }
             }
 
@@ -361,6 +384,34 @@ private struct RemoteNavigationDrawer: View {
         .background(.regularMaterial)
         .overlay(alignment: .trailing) { Rectangle().fill(.quaternary).frame(width: 1) }
         .shadow(color: .black.opacity(0.18), radius: 24, x: 10, y: 0)
+    }
+
+    @ViewBuilder
+    private var historyFooter: some View {
+        switch historyPhase {
+        case .loading?, nil:
+            if selectedWorkspace != nil {
+                ProgressView("Loading saved chats…")
+                    .controlSize(.small)
+                    .padding(8)
+            }
+        case .failed?:
+            Button("Retry loading saved chats", action: model.refreshChatList)
+                .font(.footnote)
+                .padding(8)
+        case .limited?:
+            Text("Update the Mac to see all saved chats.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(8)
+        default:
+            if rows.isEmpty {
+                Text("No chats in this project yet.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(8)
+            }
+        }
     }
 
     private var workspaceMenu: some View {
@@ -426,59 +477,22 @@ private struct RemoteNavigationDrawer: View {
 
 private struct MobileSessionDrawerRow: View {
     let row: RemoteSessionNavigationRow
-    let session: SessionRow?
     let isSelected: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .center, spacing: 9) {
-                RemoteSessionStatusPlate(row: row, hasWorktree: session?.worktreeSummary != nil)
-
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(row.item.title)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    if row.unseenDescendantCount > 0 {
-                        Text("\(row.unseenDescendantCount)")
-                            .font(.caption2.bold())
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.remoteWarmOrange, in: Capsule())
-                            .accessibilityLabel("\(row.unseenDescendantCount) child chats need attention")
-                    }
-                    if session?.mergeAttention != nil {
-                        Image(systemName: "arrow.triangle.merge")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(Color.remoteWarmOrange)
-                            .accessibilityLabel("Merge needs attention")
-                    }
-                }
-            }
-
-            HStack(spacing: 6) {
-                Text(row.item.status)
-                Text("·")
-                Text(row.item.lastActivityAt, style: .relative)
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.leading, 37)
-
-            if let detail = row.item.detail {
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .padding(.leading, 37)
-            }
+        HStack(spacing: 8) {
+            RemoteSessionStatusPlate(row: row)
+            Text(row.item.title)
+                .font(.subheadline.weight(isSelected ? .semibold : .medium))
+                .lineLimit(1)
         }
-        .padding(.leading, CGFloat(min(row.depth, 5)) * 14)
-        .padding(.vertical, 8)
+        .padding(.leading, CGFloat(min(row.depth, 5)) * 12)
         .padding(.horizontal, 8)
-        .background(isSelected ? Color.remoteWarmOrange.opacity(0.13) : .clear, in: RoundedRectangle(cornerRadius: 11))
+        .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+        .contentShape(Rectangle())
+        .background(isSelected ? Color.remoteWarmOrange.opacity(0.13) : .clear, in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 

@@ -40,15 +40,8 @@ struct RemoteWorkflowLaunchView: View {
     let onCancel: () -> Void
 
     @State private var selectedWorkflowID: String?
-    @State private var message = ""
-    @StateObject private var attachments = RemoteAttachmentDraft()
-    @State private var pendingCommandID: UUID?
-    @State private var pendingToolCommandID: UUID?
     @State private var showsAllWorkflows = false
     @State private var workflowCardHeight: CGFloat = 0
-    @State private var selectedAgentID: String?
-    @State private var selectedModelID: String?
-    @State private var selectedReasoningEffortID: String?
 
     private let workflowCardMinimumHeight: CGFloat = 112
 
@@ -67,13 +60,6 @@ struct RemoteWorkflowLaunchView: View {
     private var remainingWorkflows: [RemoteWorkflowDescriptor] {
         guard !featuredWorkflows.isEmpty else { return [] }
         return orderedWorkflows.filter { $0.featuredRank == nil }
-    }
-
-    private var supportsAgentSelection: Bool {
-        model.agentCatalogMetadata?.supportsStartSelection == true
-            && model.agentCatalog.contains(where: {
-                $0.isAvailable && $0.modelDescriptors?.contains(where: \.isAvailable) == true
-            })
     }
 
     var body: some View {
@@ -112,8 +98,12 @@ struct RemoteWorkflowLaunchView: View {
             .padding(.top, 4)
             .padding(.bottom, 18)
         }
+        .scrollDismissesKeyboard(.interactively)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            launchComposer
+            RemoteChatComposer(
+                workspaceID: workspace.workspaceID,
+                destination: .newChat(workflowID: selectedWorkflowID)
+            )
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -124,26 +114,11 @@ struct RemoteWorkflowLaunchView: View {
             guard height > 0, abs(workflowCardHeight - height) > 0.5 else { return }
             workflowCardHeight = height
         }
-        .onAppear { reconcileAgentSelection() }
         .onChange(of: model.workflowCatalog) { _, catalog in
             selectedWorkflowID = RemoteWorkflowCatalogOrdering.reconciledSelection(
                 selectedWorkflowID,
                 in: catalog
             )
-        }
-        .onChange(of: model.agentCatalog) { _, _ in reconcileAgentSelection() }
-        .onChange(of: model.agentCatalogMetadata) { _, _ in reconcileAgentSelection() }
-        .onChange(of: model.commandActivity) { _, activity in
-            if let completion = activity.completion(for: pendingCommandID) {
-                pendingCommandID = nil
-                if completion.outcome == .accepted {
-                    message = ""
-                    attachments.clear()
-                }
-            }
-            if activity.completion(for: pendingToolCommandID) != nil {
-                pendingToolCommandID = nil
-            }
         }
     }
 
@@ -278,137 +253,6 @@ struct RemoteWorkflowLaunchView: View {
         .accessibilityLabel("\(workflow.displayName) workflow")
         .accessibilityValue(selectedWorkflowID == workflow.id ? "Selected" : "Not selected")
     }
-
-    private var launchComposer: some View {
-        RemoteComposerSurface {
-            VStack(spacing: 0) {
-                RemoteAttachmentDraftStrip(draft: attachments, isSending: pendingCommandID != nil)
-                HStack(alignment: .center, spacing: 8) {
-                    if model.agentCatalogMetadata?.supportsAttachments == true {
-                        RemoteAttachmentPicker(
-                            draft: attachments,
-                            isEnabled: model.canSendAttachments && pendingCommandID == nil,
-                            onError: model.presentError
-                        )
-                        .padding(.leading, 6)
-                    }
-                    TextField(model.canControlChat ? "Send a message…" : "Read only", text: $message, axis: .vertical)
-                        .lineLimit(1...6)
-                        .textFieldStyle(.plain)
-                        .font(.body)
-                        .padding(.leading, 12)
-                        .padding(.vertical, 10)
-                        .frame(minHeight: 46, alignment: .center)
-                        .offset(y: 5)
-                        .submitLabel(.send)
-                        .onSubmit(send)
-                        .disabled(!model.canControlChat || pendingCommandID != nil)
-
-                    RemoteComposerSendButton(title: "Send", isEnabled: canSend, action: send)
-                        .padding(.trailing, 8)
-                }
-                .padding(.vertical, 4)
-
-                if supportsAgentSelection {
-                    Divider()
-                        .opacity(0.7)
-
-                    RemoteAgentSelectionBar(
-                        agents: model.agentCatalog,
-                        selectedAgentID: selectedAgentID,
-                        selectedModelID: selectedModelID,
-                        selectedReasoningEffortID: selectedReasoningEffortID,
-                        allowedAgentIDs: nil,
-                        allowedModelIDs: nil,
-                        allowedReasoningEffortIDs: nil,
-                        allowsAgentSwitch: true,
-                        isModelMutable: pendingCommandID == nil,
-                        isEffortMutable: pendingCommandID == nil,
-                        isPending: pendingCommandID != nil || pendingToolCommandID != nil,
-                        toolCatalog: model.agentCatalogMetadata?.toolCatalog,
-                        onSelectModel: selectModel,
-                        onSelectReasoningEffort: { selectedReasoningEffortID = $0 },
-                        onToggleTool: { setting, revision in
-                            pendingToolCommandID = model.configureTool(
-                                workspaceID: workspace.workspaceID,
-                                settingID: setting.id,
-                                enabled: !setting.isEnabled,
-                                expectedRevision: revision
-                            )
-                        }
-                    )
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                }
-            }
-        }
-    }
-
-    private var canSend: Bool {
-        let hasText = !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return model.canControlChat && (hasText || !attachments.files.isEmpty)
-            && (attachments.files.isEmpty || model.canSendAttachments)
-            && !attachments.isLoading && pendingCommandID == nil
-    }
-
-    private func send() {
-        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard canSend else { return }
-        pendingCommandID = model.startRun(
-            in: workspace.workspaceID,
-            message: trimmed,
-            workflowID: selectedWorkflowID,
-            agentID: supportsAgentSelection ? selectedAgentID : nil,
-            modelID: supportsAgentSelection ? selectedModelID : nil,
-            reasoningEffort: supportsAgentSelection ? selectedReasoningEffortID : nil,
-            attachments: attachments.files
-        )
-    }
-
-    private func reconcileAgentSelection() {
-        guard supportsAgentSelection else {
-            selectedAgentID = nil
-            selectedModelID = nil
-            selectedReasoningEffortID = nil
-            return
-        }
-        let availableAgents = model.agentCatalog.filter {
-            $0.isAvailable && $0.modelDescriptors?.contains(where: \.isAvailable) == true
-        }
-        let desktopDefault = model.agentCatalogMetadata?.defaultSelection
-        let requestedAgentID = selectedAgentID ?? desktopDefault?.agentID
-        guard let agent = availableAgents.first(where: { $0.id == requestedAgentID }) else {
-            selectedAgentID = nil
-            selectedModelID = nil
-            selectedReasoningEffortID = nil
-            return
-        }
-        let models = agent.modelDescriptors?.filter(\.isAvailable) ?? []
-        let requestedModelID = selectedModelID
-            ?? (desktopDefault?.agentID == agent.id ? desktopDefault?.modelID : nil)
-        guard let selectedModel = models.first(where: { $0.id == requestedModelID }) else {
-            selectedAgentID = nil
-            selectedModelID = nil
-            selectedReasoningEffortID = nil
-            return
-        }
-        let efforts = selectedModel.reasoningEfforts
-        let defaultEffortID = desktopDefault?.agentID == agent.id && desktopDefault?.modelID == selectedModel.id
-            ? desktopDefault?.reasoningEffort
-            : selectedModel.defaultReasoningEffortID
-        let effort = efforts.first(where: { $0.id == selectedReasoningEffortID })?.id
-            ?? efforts.first(where: { $0.id == defaultEffortID })?.id
-        selectedAgentID = agent.id
-        selectedModelID = selectedModel.id
-        selectedReasoningEffortID = effort
-    }
-
-    private func selectModel(agentID: String, modelID: String, reasoningEffortID: String?) {
-        selectedAgentID = agentID
-        selectedModelID = modelID
-        selectedReasoningEffortID = reasoningEffortID
-        reconcileAgentSelection()
-    }
 }
 
 struct RemoteComposerSurface<Content: View>: View {
@@ -455,6 +299,7 @@ struct RemoteAgentSelectionBar: View {
     let isEffortMutable: Bool
     let isPending: Bool
     let toolCatalog: RemoteToolCatalog?
+    let canEditTools: Bool
     let onSelectModel: (_ agentID: String, _ modelID: String, _ reasoningEffortID: String?) -> Void
     let onSelectReasoningEffort: (_ reasoningEffortID: String) -> Void
     let onToggleTool: (_ setting: RemoteToolSettingDescriptor, _ revision: Int) -> Void
@@ -472,36 +317,46 @@ struct RemoteAgentSelectionBar: View {
         selectedAgent?.modelDescriptors?.first(where: { $0.id == selectedModelID })
     }
 
-    private var availableAgents: [RemoteAgentDescriptor] {
-        agents.filter { agent in
-            agent.isAvailable
-                && (allowsAgentSwitch || agent.id == selectedAgentID)
-                && (allowedAgentIDs?.contains(agent.id) ?? true)
-                && agent.modelDescriptors?.contains(where: \.isAvailable) == true
+    private var modelOptions: [RemoteAgentDescriptor] {
+        agents.compactMap { agent in
+            let models = agent.modelDescriptors?.filter(\.isAvailable) ?? []
+            guard agent.isAvailable, !models.isEmpty else { return nil }
+            return RemoteAgentDescriptor(
+                id: agent.id,
+                displayName: agent.displayName,
+                models: models.map(\.id),
+                isAvailable: true,
+                modelDescriptors: models,
+                defaultModelID: agent.defaultModelID
+            )
         }
     }
 
-    private var availableEfforts: [RemoteReasoningEffortDescriptor] {
-        selectedModel?.reasoningEfforts.filter {
-            allowedReasoningEffortIDs?.contains($0.id) ?? true
-        } ?? []
+    private var hasSelectableModel: Bool {
+        modelOptions.contains { agent in
+            agent.modelDescriptors?.contains { canSelectModel($0.id, for: agent.id) } == true
+        }
+    }
+
+    private var effortOptions: [RemoteReasoningEffortDescriptor] {
+        selectedModel?.reasoningEfforts ?? []
+    }
+
+    private func canSelectModel(_ modelID: String, for agentID: String) -> Bool {
+        isModelMutable && !isPending
+            && (allowsAgentSwitch || agentID == selectedAgentID)
+            && (allowedAgentIDs?.contains(agentID) ?? true)
+            && (agentID != selectedAgentID || (allowedModelIDs?.contains(modelID) ?? true))
+    }
+
+    private func canSelectEffort(_ effortID: String) -> Bool {
+        isEffortMutable && !isPending && (allowedReasoningEffortIDs?.contains(effortID) ?? true)
     }
 
     var body: some View {
         HStack(spacing: 8) {
             Button {
-                modelPickerAgents = availableAgents.compactMap { agent in
-                    let models = availableModels(for: agent)
-                    guard !models.isEmpty else { return nil }
-                    return RemoteAgentDescriptor(
-                        id: agent.id,
-                        displayName: agent.displayName,
-                        models: models.map(\.id),
-                        isAvailable: true,
-                        modelDescriptors: models,
-                        defaultModelID: agent.defaultModelID
-                    )
-                }
+                modelPickerAgents = modelOptions
                 modelPickerSelectedAgentID = selectedAgentID
                 modelPickerSelectedModelID = selectedModelID
                 showsModelPicker = true
@@ -519,7 +374,7 @@ struct RemoteAgentSelectionBar: View {
                 .frame(minHeight: 30)
                 .background(Color.primary.opacity(0.08), in: Capsule())
             }
-            .disabled(!isModelMutable || availableAgents.isEmpty || isPending)
+            .disabled(!hasSelectableModel)
             .sheet(isPresented: $showsModelPicker) {
                 NavigationStack {
                     List {
@@ -540,6 +395,7 @@ struct RemoteAgentSelectionBar: View {
                                             }
                                         }
                                     }
+                                    .disabled(!canSelectModel(candidate.id, for: agent.id))
                                 }
                             }
                         }
@@ -554,9 +410,9 @@ struct RemoteAgentSelectionBar: View {
                 .presentationDetents([.medium, .large])
             }
 
-            if !availableEfforts.isEmpty {
+            if !effortOptions.isEmpty {
                 Menu {
-                    ForEach(availableEfforts, id: \.id) { effort in
+                    ForEach(effortOptions, id: \.id) { effort in
                         Button {
                             onSelectReasoningEffort(effort.id)
                         } label: {
@@ -567,6 +423,7 @@ struct RemoteAgentSelectionBar: View {
                                 }
                             }
                         }
+                        .disabled(!canSelectEffort(effort.id))
                     }
                 } label: {
                     HStack(spacing: 4) {
@@ -580,11 +437,11 @@ struct RemoteAgentSelectionBar: View {
                     .frame(minHeight: 30)
                     .background(Color.primary.opacity(0.08), in: Capsule())
                 }
-                .disabled(!isEffortMutable || isPending)
+                .disabled(!effortOptions.contains { canSelectEffort($0.id) })
             }
 
             if let toolCatalog, selectedAgentID == toolCatalog.providerID {
-                RemoteToolsButton(catalog: toolCatalog, isPending: isPending, onToggle: onToggleTool)
+                RemoteToolsButton(catalog: toolCatalog, isPending: isPending, canEdit: canEditTools, onToggle: onToggleTool)
             }
 
             if isPending {
@@ -602,22 +459,17 @@ struct RemoteAgentSelectionBar: View {
     }
 
     private var effortLabel: String {
-        availableEfforts.first(where: { $0.id == selectedReasoningEffortID })?.displayName
+        effortOptions.first(where: { $0.id == selectedReasoningEffortID })?.displayName
             ?? selectedReasoningEffortID?.capitalized
             ?? "Effort"
     }
 
-    private func availableModels(for agent: RemoteAgentDescriptor) -> [RemoteModelDescriptor] {
-        agent.modelDescriptors?.filter { model in
-            model.isAvailable
-                && (agent.id != selectedAgentID || (allowedModelIDs?.contains(model.id) ?? true))
-        } ?? []
-    }
 }
 
 private struct RemoteToolsButton: View {
     let catalog: RemoteToolCatalog
     let isPending: Bool
+    let canEdit: Bool
     let onToggle: (RemoteToolSettingDescriptor, Int) -> Void
     @State private var presentedCatalog: RemoteToolCatalog?
 
@@ -656,7 +508,7 @@ private struct RemoteToolsButton: View {
                                                 presentedCatalog = nil
                                             }
                                         ))
-                                        .disabled(!snapshot.isMutable || !setting.isMutable || setting.isRequired)
+                                        .disabled(!canEdit || !snapshot.isMutable || !setting.isMutable || setting.isRequired)
                                     }
                                 }
                             }

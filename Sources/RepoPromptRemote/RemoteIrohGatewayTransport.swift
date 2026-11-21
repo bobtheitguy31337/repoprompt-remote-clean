@@ -209,11 +209,8 @@ final class RemoteIrohGatewayTransport: RemoteGatewayTransport, @unchecked Senda
         try await rpc(.command, payload: encoder.encode(request))
     }
 
-    func history(query: String?, limit: Int) async throws -> RemoteHistoryPage {
-        try await rpc(
-            .history,
-            payload: encoder.encode(RemoteHistoryRPCRequest(query: query, limit: limit))
-        )
+    func history(_ request: RemoteHistoryRPCRequest) async throws -> RemoteHistoryPage {
+        try await rpc(.history, payload: encoder.encode(request))
     }
 
     func transcript(

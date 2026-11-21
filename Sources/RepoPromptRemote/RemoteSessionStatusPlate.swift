@@ -2,7 +2,6 @@ import SwiftUI
 
 struct RemoteSessionStatusPlate: View {
     let row: RemoteSessionNavigationRow
-    let hasWorktree: Bool
 
     private var color: Color {
         switch row.status {
@@ -36,78 +35,33 @@ struct RemoteSessionStatusPlate: View {
 
             statusGlyph
 
-            if hasWorktree {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundStyle(.secondary)
-                    .padding(3)
-                    .background(.background, in: Circle())
-                    .offset(x: 10, y: 10)
-            }
         }
-        .frame(width: 28, height: 28)
+        .frame(width: 24, height: 24)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
     }
 
+    @ViewBuilder
     private var statusGlyph: some View {
-        ZStack {
-            identityGlyph
-                .opacity(row.status == .idle ? 1 : 0.5)
-
-            switch row.status {
-            case .opening, .working:
-                ProgressView()
-                    .controlSize(.mini)
-                    .tint(color)
-            case .waiting:
-                Image(systemName: "hand.raised.fill")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(color)
-                    .offset(x: 7, y: -7)
-            case .blocked:
-                Image(systemName: "exclamationmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(color)
-                    .offset(x: 7, y: -7)
-            case let .completed(unseen):
-                if unseen {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(color)
-                }
-            case let .failed(unseen):
-                if unseen {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(color)
-                }
-            case .cancelled:
-                Image(systemName: "minus")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(color)
-                    .offset(x: 7, y: -7)
-            case .unreadNarrative:
-                Circle()
-                    .fill(color)
-                    .frame(width: 6, height: 6)
-                    .offset(x: 7, y: -7)
-            case .idle:
-                EmptyView()
-            }
+        if row.status == .opening || row.status == .working {
+            ProgressView().controlSize(.mini).tint(color)
+        } else {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(color)
         }
     }
 
-    @ViewBuilder
-    private var identityGlyph: some View {
-        if row.depth > 0 {
-            Image(systemName: "arrow.turn.down.right")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(color)
-        } else {
-            Circle()
-                .fill(color)
-                .frame(width: 6, height: 6)
+    private var symbol: String {
+        switch row.status {
+        case .opening, .working: "arrow.clockwise"
+        case .waiting: "hand.raised.fill"
+        case .blocked: "exclamationmark"
+        case .completed: "checkmark"
+        case .failed: "xmark"
+        case .cancelled: "minus"
+        case .unreadNarrative: "circle.fill"
+        case .idle: row.depth == 0 ? "bubble.left" : "arrow.turn.down.right"
         }
     }
 
@@ -124,6 +78,9 @@ struct RemoteSessionStatusPlate: View {
         case .failed: state = "failed"
         case .cancelled: state = "cancelled"
         case .unreadNarrative: state = "new activity"
+        }
+        if row.unseenDescendantCount > 0 {
+            return "\(identity), \(state), \(row.unseenDescendantCount) child chats need attention"
         }
         return "\(identity), \(state)"
     }

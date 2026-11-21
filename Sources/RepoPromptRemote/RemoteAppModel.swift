@@ -100,6 +100,48 @@ struct RemoteProvisionalSessionRoute: Equatable {
     }
 }
 
+struct RemoteWorkspaceHistory: Equatable {
+    enum Phase: Equatable {
+        case loading
+        case loaded
+        case limited
+        case failed
+    }
+
+    var entries: [RemoteHistoryEntry] = []
+    var phase: Phase = .loading
+
+    static func load(
+        workspaceID: UUID,
+        fetch: (RemoteHistoryRPCRequest) async throws -> RemoteHistoryPage
+    ) async throws -> Self {
+        var entries: [RemoteHistoryEntry] = []
+        var seenSessions: Set<UUID> = []
+        var before: RemoteHistoryCursor?
+
+        while true {
+            let page = try await fetch(.init(limit: 100, workspaceID: workspaceID, before: before))
+            try Task.checkCancellation()
+            let matchingEntries = page.entries.filter { UUID(uuidString: $0.workspaceID) == workspaceID }
+            if page.workspaceID == nil, before == nil {
+                // Older Macs ignore workspace scope and return one global page.
+                return Self(entries: matchingEntries, phase: page.hasMore ? .limited : .loaded)
+            }
+            guard page.workspaceID == workspaceID, matchingEntries.count == page.entries.count else {
+                throw RemoteGatewayError.invalidResponse
+            }
+
+            entries += matchingEntries.filter { seenSessions.insert($0.id).inserted }
+            guard page.hasMore else { return Self(entries: entries, phase: .loaded) }
+            guard let last = page.entries.last, let older = page.olderCursor,
+                  older == RemoteHistoryCursor(lastActivityAt: last.lastActivityAt, sessionID: last.id),
+                  before.map({ older < $0 }) ?? true
+            else { throw RemoteGatewayError.invalidResponse }
+            before = older
+        }
+    }
+}
+
 @MainActor
 final class RemoteAppModel: ObservableObject {
     enum ConnectionState: Equatable {
@@ -136,7 +178,7 @@ final class RemoteAppModel: ObservableObject {
     @Published private(set) var lastAcceptedCommandID: UUID?
     @Published private(set) var lastAcceptedCommand: RemoteAcceptedCommand?
     @Published private(set) var snapshot: RemoteSnapshot?
-    @Published private(set) var chatEntries: [RemoteHistoryEntry] = []
+    @Published private(set) var workspaceHistory: [String: RemoteWorkspaceHistory] = [:]
     enum TranscriptDetailState: Equatable {
         case loading
         case loaded
@@ -170,6 +212,7 @@ final class RemoteAppModel: ObservableObject {
     private var reducer = RemoteSnapshotReducer()
     private var eventTask: Task<Void, Never>?
     private var chatListTask: Task<Void, Never>?
+    private var selectedHistoryWorkspaceID: String?
     private var discovery: RemoteBonjourDiscovery?
     private var pairingTask: Task<Void, Never>?
     private var pairingAttemptID: UUID?
@@ -303,7 +346,7 @@ final class RemoteAppModel: ObservableObject {
 
     func chatList(for workspaceID: String) -> [RemoteChatListItem] {
         RemoteChatListProjection.project(
-            historyEntries: chatEntries,
+            historyEntries: workspaceHistory[workspaceID]?.entries ?? [],
             sessions: sessions,
             provisionalRoutes: Array(provisionalSessionRoutes.values),
             workspaceID: workspaceID
@@ -331,7 +374,7 @@ final class RemoteAppModel: ObservableObject {
             for: sessionID,
             provisionalRoutes: Array(provisionalSessionRoutes.values),
             sessions: snapshot?.sessions ?? [],
-            historyEntries: chatEntries
+            historyEntries: workspaceHistory.values.flatMap(\.entries)
         )
     }
 
@@ -676,19 +719,32 @@ final class RemoteAppModel: ObservableObject {
         }
     }
 
-    func refreshChatList() {
-        clearTransientError()
+    func selectHistoryWorkspace(_ workspaceID: String?) {
+        guard selectedHistoryWorkspaceID != workspaceID else { return }
         chatListTask?.cancel()
-        chatListTask = Task { [weak self] in
-            guard let self else { return }
+        chatListTask = nil
+        selectedHistoryWorkspaceID = workspaceID
+        refreshChatList()
+    }
+
+    func refreshChatList() {
+        guard let gateway, let selection = selectedHistoryWorkspaceID,
+              let workspaceID = UUID(uuidString: selection)
+        else { return }
+        chatListTask?.cancel()
+        var history = workspaceHistory[selection] ?? RemoteWorkspaceHistory()
+        history.phase = .loading
+        workspaceHistory[selection] = history
+        chatListTask = Task { [weak self, weak gateway] in
+            guard let self, let gateway else { return }
             do {
-                guard let gateway else { throw RemotePairingError.unavailableDesktop }
-                let page = try await gateway.history(limit: 100)
-                guard !Task.isCancelled else { return }
-                chatEntries = page.entries
+                let result = try await RemoteWorkspaceHistory.load(workspaceID: workspaceID, fetch: gateway.history)
+                guard !Task.isCancelled, self.gateway === gateway, selection == selectedHistoryWorkspaceID else { return }
+                workspaceHistory[selection] = result
             } catch {
-                guard !isExpectedCancellation(error) else { return }
-                presentError(error.localizedDescription)
+                guard !Task.isCancelled, self.gateway === gateway, selection == selectedHistoryWorkspaceID else { return }
+                history.phase = .failed
+                workspaceHistory[selection] = history
             }
         }
     }
@@ -977,6 +1033,8 @@ final class RemoteAppModel: ObservableObject {
     }
 
     private func endConnectionCycle() {
+        chatListTask?.cancel()
+        chatListTask = nil
         gateway?.close()
         gateway = nil
         transportStatus = "None"
@@ -1101,7 +1159,8 @@ final class RemoteAppModel: ObservableObject {
         snapshot = nil
         chatListTask?.cancel()
         chatListTask = nil
-        chatEntries = []
+        selectedHistoryWorkspaceID = nil
+        workspaceHistory = [:]
         cancelAllTranscriptTasks()
         transcriptTimelinesBySessionID = [:]
         knownTranscriptRevisions = [:]

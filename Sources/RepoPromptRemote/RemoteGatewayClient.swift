@@ -42,7 +42,7 @@ protocol RemoteGatewayTransport: AnyObject {
     func workflows() async throws -> [RemoteWorkflowDescriptor]
     func contextBuilder(_ request: RemoteCommandRequest) async throws -> RemoteCommandResponse
     func command(_ request: RemoteCommandRequest) async throws -> RemoteCommandResponse
-    func history(query: String?, limit: Int) async throws -> RemoteHistoryPage
+    func history(_ request: RemoteHistoryRPCRequest) async throws -> RemoteHistoryPage
     func transcript(
         sessionID: UUID,
         afterSequenceIndex: Int?,
@@ -62,10 +62,6 @@ protocol RemoteGatewayTransport: AnyObject {
 extension RemoteGatewayTransport {
     var irohPath: RemoteIrohPathKind? { nil }
     func close() {}
-
-    func history(limit: Int) async throws -> RemoteHistoryPage {
-        try await history(query: nil, limit: limit)
-    }
 
     func transcript(
         sessionID: UUID,
@@ -228,19 +224,29 @@ final class RemoteHTTPSGatewayTransport: RemoteGatewayTransport {
         return response
     }
 
-    func history(query: String? = nil, limit: Int = 50) async throws -> RemoteHistoryPage {
+    func history(_ request: RemoteHistoryRPCRequest) async throws -> RemoteHistoryPage {
         let response: RemoteHistoryPage = try await send(
             path: RemoteProtocol.historyPath,
             method: "GET",
-            queryItems: [
-                query.map { URLQueryItem(name: "q", value: $0) },
-                URLQueryItem(name: "limit", value: String(limit))
-            ].compactMap { $0 }
+            queryItems: Self.historyQueryItems(request)
         )
         guard RemoteProtocol.supports(response.protocolVersion) else {
             throw RemoteGatewayError.protocolMismatch(response.protocolVersion)
         }
         return response
+    }
+
+    static func historyQueryItems(_ request: RemoteHistoryRPCRequest) -> [URLQueryItem] {
+        var items = [
+            request.query.map { URLQueryItem(name: "q", value: $0) },
+            request.workspaceID.map { URLQueryItem(name: "workspace_id", value: $0.uuidString) },
+            URLQueryItem(name: "limit", value: String(request.limit))
+        ].compactMap { $0 }
+        if let before = request.before {
+            items.append(URLQueryItem(name: "before_date", value: String(before.lastActivityAt.timeIntervalSinceReferenceDate)))
+            items.append(URLQueryItem(name: "before_id", value: before.sessionID.uuidString))
+        }
+        return items
     }
 
     func transcript(

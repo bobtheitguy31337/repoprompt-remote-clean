@@ -57,7 +57,6 @@ struct RemoteChatView: View {
     let title: String
     let initialRunState: RemoteRunState?
 
-    @State private var message = ""
     @State private var expandedGroupIDs: Set<String> = []
     @State private var expandedDetailIDs: Set<UUID> = []
     @State private var visibleItemIDs: Set<UUID> = []
@@ -194,12 +193,8 @@ struct RemoteChatView: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 RemoteChatComposer(
-                    message: $message,
-                    sessionID: sessionID,
                     workspaceID: workspaceID,
-                    runState: runState,
-                    pendingInteraction: session?.pendingInteraction,
-                    session: session
+                    destination: .session(sessionID, runState)
                 )
                 .environmentObject(model)
             }
@@ -853,22 +848,38 @@ private struct RemoteToolDetails: View {
     }
 }
 
-private struct RemoteChatComposer: View {
-    @EnvironmentObject private var model: RemoteAppModel
-    @Binding var message: String
-    let sessionID: UUID
-    let workspaceID: String
-    let runState: RemoteRunState
-    let pendingInteraction: RemoteInteractionSummary?
-    let session: SessionRow?
+struct RemoteChatComposer: View {
+    enum Destination {
+        case newChat(workflowID: String?)
+        case session(UUID, RemoteRunState)
+    }
 
+    @EnvironmentObject private var model: RemoteAppModel
+    let workspaceID: String
+    let destination: Destination
+
+    @State private var message = ""
     @StateObject private var attachments = RemoteAttachmentDraft()
     @State private var pendingCommandID: UUID?
     @State private var pendingCancelID: UUID?
     @State private var pendingConfigurationID: UUID?
+    @State private var draftSelection: RemoteAgentSelection?
+
+    private var sessionID: UUID? {
+        guard case let .session(id, _) = destination else { return nil }
+        return id
+    }
+
+    private var session: SessionRow? {
+        guard let sessionID else { return nil }
+        return model.sessions.first { $0.id == sessionID }
+    }
 
     private var policy: RemoteComposerPolicy {
-        .resolve(runState: runState, pendingInteraction: pendingInteraction)
+        switch destination {
+        case .newChat: .newChat
+        case let .session(_, runState): .resolve(runState: runState, pendingInteraction: session?.pendingInteraction)
+        }
     }
 
     private var canSend: Bool {
@@ -884,6 +895,23 @@ private struct RemoteChatComposer: View {
     private var configurationControls: RemoteSessionConfigurationControls? {
         guard model.agentCatalogMetadata?.supportsSessionConfiguration == true else { return nil }
         return session?.configurationControls
+    }
+
+    private var showsSelection: Bool {
+        if sessionID != nil {
+            return configurationControls != nil && session?.agent != nil && session?.model != nil
+        }
+        return model.agentCatalogMetadata?.supportsStartSelection == true
+            && model.agentCatalog.contains { $0.isAvailable && $0.modelDescriptors?.contains(where: \.isAvailable) == true }
+    }
+
+    private var launchSelection: RemoteAgentSelection? {
+        guard sessionID == nil, showsSelection else { return nil }
+        return RemoteLaunchSelection.resolve(
+            draft: draftSelection,
+            desktopDefault: model.agentCatalogMetadata?.defaultSelection,
+            agents: model.agentCatalog
+        )
     }
 
     var body: some View {
@@ -920,7 +948,7 @@ private struct RemoteChatComposer: View {
                         .onSubmit(send)
                         .disabled(!model.canControlChat || policy.primaryOperation == nil || pendingCommandID != nil)
 
-                    if policy.canCancel && model.canControlChat {
+                    if let sessionID, policy.canCancel && model.canControlChat {
                         Button {
                             guard pendingCancelID == nil else { return }
                             pendingCancelID = model.cancel(sessionID: sessionID, workspaceID: workspaceID)
@@ -944,41 +972,11 @@ private struct RemoteChatComposer: View {
                 }
                 .padding(.vertical, 4)
 
-                if let controls = configurationControls,
-                   let session,
-                   session.agent != nil,
-                   session.model != nil
-                {
+                if showsSelection {
                     Divider()
-
-                    RemoteAgentSelectionBar(
-                        agents: model.agentCatalog,
-                        selectedAgentID: session.agent,
-                        selectedModelID: session.model,
-                        selectedReasoningEffortID: session.reasoningEffort,
-                        allowedAgentIDs: Set(controls.agent.allowedValueIDs),
-                        allowedModelIDs: Set(controls.model.allowedValueIDs),
-                        allowedReasoningEffortIDs: Set(controls.reasoningEffort.allowedValueIDs),
-                        allowsAgentSwitch: false,
-                        isModelMutable: controls.model.isMutable,
-                        isEffortMutable: controls.reasoningEffort.isMutable,
-                        isPending: pendingConfigurationID != nil,
-                        toolCatalog: model.agentCatalogMetadata?.toolCatalog,
-                        onSelectModel: configureModel,
-                        onSelectReasoningEffort: configureReasoningEffort,
-                        onToggleTool: { setting, revision in
-                            pendingConfigurationID = model.configureTool(
-                                workspaceID: workspaceID,
-                                sessionID: sessionID,
-                                settingID: setting.id,
-                                enabled: !setting.isEnabled,
-                                expectedRevision: revision
-                            )
-                        }
-                    )
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-
+                    selectionBar
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
                 }
             }
         }
@@ -995,45 +993,103 @@ private struct RemoteChatComposer: View {
         }
     }
 
+    private var selectionBar: some View {
+        let controls = configurationControls
+        let isPending = pendingCommandID != nil || pendingConfigurationID != nil
+        return RemoteAgentSelectionBar(
+            agents: model.agentCatalog,
+            selectedAgentID: session?.agent ?? launchSelection?.agentID,
+            selectedModelID: session?.model ?? launchSelection?.modelID,
+            selectedReasoningEffortID: session?.reasoningEffort ?? launchSelection?.reasoningEffort,
+            allowedAgentIDs: controls.map { Set($0.agent.allowedValueIDs) },
+            allowedModelIDs: controls.map { Set($0.model.allowedValueIDs) },
+            allowedReasoningEffortIDs: controls.map { Set($0.reasoningEffort.allowedValueIDs) },
+            allowsAgentSwitch: sessionID == nil,
+            isModelMutable: model.canControlChat && (controls?.model.isMutable ?? true),
+            isEffortMutable: model.canControlChat && (controls?.reasoningEffort.isMutable ?? true),
+            isPending: isPending,
+            toolCatalog: model.agentCatalogMetadata?.toolCatalog,
+            canEditTools: model.canControlChat,
+            onSelectModel: configureModel,
+            onSelectReasoningEffort: configureReasoningEffort,
+            onToggleTool: { setting, revision in
+                guard model.canControlChat, pendingConfigurationID == nil, pendingCommandID == nil else { return }
+                pendingConfigurationID = model.configureTool(
+                    workspaceID: workspaceID,
+                    sessionID: sessionID,
+                    settingID: setting.id,
+                    enabled: !setting.isEnabled,
+                    expectedRevision: revision
+                )
+            }
+        )
+    }
+
     private var placeholder: String {
         if !model.canControlChat { return "Read only" }
         switch policy.primaryOperation {
+        case .startRun?, .followUp?: return "Send a message…"
         case .steer?: return "Steer this run…"
         case .resume?: return "Resume with…"
-        case .followUp?: return "Reply…"
         default: return "Respond above"
         }
     }
 
     private func send() {
-        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSend else { return }
-        pendingCommandID = model.continueChat(
-            sessionID: sessionID,
-            workspaceID: workspaceID,
-            message: trimmed,
-            runState: runState,
-            attachments: attachments.files
-        )
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch destination {
+        case let .newChat(workflowID):
+            let selection = launchSelection
+            pendingCommandID = model.startRun(
+                in: workspaceID,
+                message: trimmed,
+                workflowID: workflowID,
+                agentID: selection?.agentID,
+                modelID: selection?.modelID,
+                reasoningEffort: selection?.reasoningEffort,
+                attachments: attachments.files
+            )
+        case let .session(sessionID, runState):
+            pendingCommandID = model.continueChat(
+                sessionID: sessionID,
+                workspaceID: workspaceID,
+                message: trimmed,
+                runState: runState,
+                attachments: attachments.files
+            )
+        }
     }
 
     private func configureModel(agentID: String, modelID: String, reasoningEffortID: String?) {
-        guard pendingConfigurationID == nil else { return }
-        pendingConfigurationID = model.configureSession(
-            sessionID: sessionID,
-            workspaceID: workspaceID,
-            agentID: agentID,
-            modelID: modelID,
-            reasoningEffort: reasoningEffortID
-        )
+        guard model.canControlChat, pendingConfigurationID == nil, pendingCommandID == nil else { return }
+        if let sessionID {
+            pendingConfigurationID = model.configureSession(
+                sessionID: sessionID,
+                workspaceID: workspaceID,
+                agentID: agentID,
+                modelID: modelID,
+                reasoningEffort: reasoningEffortID
+            )
+        } else {
+            draftSelection = RemoteAgentSelection(agentID: agentID, modelID: modelID, reasoningEffort: reasoningEffortID)
+        }
     }
 
     private func configureReasoningEffort(_ reasoningEffortID: String) {
-        guard pendingConfigurationID == nil else { return }
-        pendingConfigurationID = model.configureSession(
-            sessionID: sessionID,
-            workspaceID: workspaceID,
-            reasoningEffort: reasoningEffortID
-        )
+        guard model.canControlChat, pendingConfigurationID == nil, pendingCommandID == nil else { return }
+        if let sessionID {
+            pendingConfigurationID = model.configureSession(
+                sessionID: sessionID,
+                workspaceID: workspaceID,
+                reasoningEffort: reasoningEffortID
+            )
+        } else if let selection = launchSelection {
+            draftSelection = RemoteAgentSelection(
+                agentID: selection.agentID,
+                modelID: selection.modelID,
+                reasoningEffort: reasoningEffortID
+            )
+        }
     }
 }
