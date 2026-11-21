@@ -6,7 +6,6 @@ enum RemoteGatewayError: LocalizedError {
     case invalidResponse
     case attachmentRejected(String)
     case imageUnavailable
-    case imageUpgradeRequired
     case httpStatus(Int, RemoteErrorResponse?)
     case protocolMismatch(Int)
     case certificateMismatch
@@ -18,7 +17,6 @@ enum RemoteGatewayError: LocalizedError {
         case .invalidResponse: "The Mac returned an invalid response."
         case let .attachmentRejected(message): message
         case .imageUnavailable: "The image is unavailable on the Mac."
-        case .imageUpgradeRequired: "Update RepoPrompt on the Mac to open the full image."
         case let .httpStatus(status, error): error?.message ?? "The Mac returned HTTP \(status)."
         case let .protocolMismatch(version): "This Mac requires an unsupported remote protocol version (\(version))."
         case .certificateMismatch: "The Mac identity did not match the pairing record."

@@ -172,7 +172,6 @@ struct RemoteTranscriptTimelineState: Equatable {
                cached.detailAvailable == item.detailAvailable,
                cached.attachments?.map(\.id) == item.attachments?.map(\.id),
                cached.detail != nil || cached.detailText != nil
-                   || cached.attachments?.contains(where: { $0.thumbnail != nil }) == true
             {
                 itemsByID[item.id] = item
                 mergeDetails(from: cached, resort: false)

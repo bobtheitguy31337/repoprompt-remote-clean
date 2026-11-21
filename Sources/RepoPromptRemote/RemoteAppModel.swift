@@ -857,42 +857,25 @@ final class RemoteAppModel: ObservableObject {
         }
     }
 
-    var supportsOriginalImages: Bool { agentCatalogMetadata?.supportsImageAttachments == true }
-
     func imageThumbnail(sessionID: UUID, itemID: UUID, attachmentID: UUID) async throws -> Data {
         let desktop = snapshot?.desktop.instanceID
         let key = "\(desktop ?? ""):\(sessionID):\(itemID):\(attachmentID)" as NSString
         if let cached = imageThumbnails.object(forKey: key) { return cached as Data }
 
-        let bytes: Data
-        if supportsOriginalImages {
-            let chunk = try await fetchImageChunk(
-                RemoteImageAttachmentRequest(sessionID: sessionID, itemID: itemID, attachmentID: attachmentID, variant: .thumbnail)
-            )
-            guard chunk.offset == 0, chunk.revision == nil,
-                  chunk.totalBytes == chunk.bytes.count,
-                  (1 ... RemoteImageAttachmentRequest.maxThumbnailBytes).contains(chunk.bytes.count)
-            else { throw RemoteGatewayError.invalidResponse }
-            bytes = chunk.bytes
-        } else {
-            // Older Macs can still supply the existing preview through the exact transcript row.
-            guard let gateway else { throw RemotePairingError.unavailableDesktop }
-            let page = try await withImageReadSlot {
-                try await gateway.transcript(sessionID: sessionID, itemID: itemID, limit: 1, includeDetails: true)
-            }
-            guard let preview = page.items.first(where: { $0.id == itemID })?.attachments?
-                .first(where: { $0.id == attachmentID })?.thumbnail
-            else { throw RemoteGatewayError.imageUnavailable }
-            bytes = preview
-        }
+        let chunk = try await fetchImageChunk(
+            RemoteImageAttachmentRequest(sessionID: sessionID, itemID: itemID, attachmentID: attachmentID, variant: .thumbnail)
+        )
+        guard chunk.offset == 0, chunk.revision == nil,
+              chunk.totalBytes == chunk.bytes.count,
+              (1 ... RemoteImageAttachmentRequest.maxThumbnailBytes).contains(chunk.bytes.count)
+        else { throw RemoteGatewayError.invalidResponse }
         try Task.checkCancellation()
         guard snapshot?.desktop.instanceID == desktop else { throw CancellationError() }
-        imageThumbnails.setObject(bytes as NSData, forKey: key, cost: bytes.count)
-        return bytes
+        imageThumbnails.setObject(chunk.bytes as NSData, forKey: key, cost: chunk.bytes.count)
+        return chunk.bytes
     }
 
     func originalImage(sessionID: UUID, itemID: UUID, attachmentID: UUID) async throws -> Data {
-        guard supportsOriginalImages else { throw RemoteGatewayError.imageUpgradeRequired }
         let desktop = snapshot?.desktop.instanceID
         var download = RemoteImageDownload()
         while !download.isComplete {

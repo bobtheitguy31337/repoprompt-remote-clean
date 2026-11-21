@@ -472,7 +472,7 @@ private struct RemoteTranscriptPhoto: View {
             }
         }
         .frame(height: thumbnailBounds.height, alignment: alignment)
-        .task(id: LoadIdentity(connection: model.connectionState, retry: retry, supportsOriginal: model.supportsOriginalImages)) {
+        .task(id: LoadIdentity(connection: model.connectionState, retry: retry)) {
             await loadThumbnail()
         }
         .fullScreenCover(isPresented: $showsOriginal) {
@@ -485,10 +485,6 @@ private struct RemoteTranscriptPhoto: View {
 
     private func loadThumbnail() async {
         guard thumbnail == nil else { return }
-        if let data = attachment.thumbnail, let image = UIImage(data: data) {
-            thumbnail = image
-            return
-        }
         guard model.connectionState == .connected else { return }
         failed = false
         do {
@@ -504,7 +500,6 @@ private struct RemoteTranscriptPhoto: View {
     private struct LoadIdentity: Equatable {
         let connection: RemoteAppModel.ConnectionState
         let retry: Int
-        let supportsOriginal: Bool
     }
 }
 
@@ -516,7 +511,6 @@ private struct RemoteFullImageViewer: View {
     @State private var image: UIImage?
     @State private var failure: String?
     @State private var retry = 0
-    @State private var canRetry = true
     @State private var zoom: CGFloat = 1
     @GestureState private var magnification: CGFloat = 1
 
@@ -551,9 +545,7 @@ private struct RemoteFullImageViewer: View {
                         VStack {
                             if let failure {
                                 Text(failure).multilineTextAlignment(.center)
-                                if canRetry {
-                                    Button("Retry") { retry += 1 }.buttonStyle(.borderedProminent)
-                                }
+                                Button("Retry") { retry += 1 }.buttonStyle(.borderedProminent)
                             } else {
                                 ProgressView("Loading full image…")
                             }
@@ -574,7 +566,6 @@ private struct RemoteFullImageViewer: View {
         .preferredColorScheme(.dark)
         .task(id: retry) {
             failure = nil
-            canRetry = true
             do {
                 let bytes = try await load()
                 let worker = Task.detached(priority: .userInitiated) { Self.decodedImage(bytes) }
@@ -584,7 +575,6 @@ private struct RemoteFullImageViewer: View {
                 image = decoded
             } catch {
                 guard !Task.isCancelled else { return }
-                if case RemoteGatewayError.imageUpgradeRequired = error { canRetry = false }
                 failure = error.localizedDescription
             }
         }
@@ -1608,8 +1598,10 @@ private struct RemoteAgentSelectionBar: View {
             .accessibilityLabel("Reasoning level")
             .accessibilityValue(effortLabel)
             .disabled(!effortOptions.contains { canSelectEffort($0.id) })
+            .layoutPriority(1)
 
             RemoteToolsButton(catalog: toolCatalog, isPending: isPending, canEdit: canEditTools, onToggle: onToggleTool)
+                .layoutPriority(1)
         }
         .accessibilityElement(children: .contain)
     }
@@ -1690,7 +1682,7 @@ private struct RemoteComposerControlLabel: View {
             Image(systemName: "chevron.down")
                 .font(.caption2.weight(.semibold))
         }
-        .font(.caption.weight(.semibold))
+        .font(.subheadline.weight(.semibold))
         .foregroundStyle(Color.remoteWarmOrange)
         .padding(.horizontal, 7)
         .frame(minHeight: RemoteChatComposer.buttonHeight)
