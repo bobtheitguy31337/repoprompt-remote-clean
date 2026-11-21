@@ -118,6 +118,7 @@ final class RemoteAttachmentDraft: ObservableObject {
 
 struct RemoteAttachmentPicker: View {
     @ObservedObject var draft: RemoteAttachmentDraft
+    let buttonHeight: CGFloat
     let isEnabled: Bool
     let onError: (String) -> Void
 
@@ -137,10 +138,12 @@ struct RemoteAttachmentPicker: View {
                     Image(systemName: "plus").font(.body.weight(.semibold))
                 }
             }
-            .frame(width: 34, height: 38)
+            .frame(width: buttonHeight, height: buttonHeight)
             .foregroundStyle(Color.remoteWarmOrange)
-            .contentShape(Rectangle())
+            .background(Color.remoteWarmOrange.opacity(0.12), in: Circle())
+            .contentShape(Circle())
         }
+        .buttonStyle(.plain)
         .disabled(!isEnabled || draft.isLoading || draft.files.count >= RemoteAttachmentLimits.maxCount)
         .accessibilityLabel(draft.isLoading ? "Loading attachments" : "Attach files or photos")
         .fileImporter(isPresented: $showsFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in

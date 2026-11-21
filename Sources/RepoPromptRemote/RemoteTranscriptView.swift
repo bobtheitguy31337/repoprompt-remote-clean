@@ -49,6 +49,14 @@ private struct RemoteTranscriptBottomPreferenceKey: PreferenceKey {
     }
 }
 
+private struct RemoteComposerHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct RemoteChatView: View {
     @EnvironmentObject private var model: RemoteAppModel
 
@@ -66,6 +74,7 @@ struct RemoteChatView: View {
     @State private var prependAnchorID: UUID?
     @State private var itemCountBeforePrepend = 0
     @State private var scrollViewportHeight: CGFloat = 0
+    @State private var composerHeight: CGFloat = 0
 
     init(
         sessionID: UUID,
@@ -136,7 +145,6 @@ struct RemoteChatView: View {
 
                     Color.clear
                         .frame(height: 1)
-                        .id("transcript-bottom")
                         .background {
                             GeometryReader { geometry in
                                 Color.clear.preference(
@@ -146,10 +154,14 @@ struct RemoteChatView: View {
                             }
                         }
                         .onDisappear { isNearBottom = false }
+
+                    Color.clear
+                        .frame(height: composerHeight + 6)
+                        .accessibilityHidden(true)
+                        .id("transcript-bottom")
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 10)
-                .padding(.bottom, 20)
             }
             .coordinateSpace(name: "transcript-scroll-space")
             .background {
@@ -164,7 +176,7 @@ struct RemoteChatView: View {
             .onPreferenceChange(RemoteTranscriptBottomPreferenceKey.self) { bottomY in
                 guard scrollViewportHeight > 0 else { return }
                 let wasNearBottom = isNearBottom
-                isNearBottom = bottomY <= scrollViewportHeight + 24
+                isNearBottom = bottomY <= scrollViewportHeight - composerHeight + 24
                 if isNearBottom, !wasNearBottom {
                     showsNewActivity = false
                 }
@@ -181,7 +193,7 @@ struct RemoteChatView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .padding(.trailing, 14)
-                    .padding(.bottom, 12)
+                    .padding(.bottom, composerHeight + 12)
                 }
             }
             .onChange(of: items) { oldItems, newItems in
@@ -191,7 +203,22 @@ struct RemoteChatView: View {
                 guard isNearBottom else { return }
                 proxy.scrollTo("transcript-bottom", anchor: .bottom)
             }
-            .remoteChatComposer(workspaceID: workspaceID, destination: .session(sessionID, runState))
+            .overlay(alignment: .bottom) {
+                RemoteChatComposer(workspaceID: workspaceID, destination: .session(sessionID, runState))
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(key: RemoteComposerHeightPreferenceKey.self, value: geometry.size.height)
+                        }
+                    }
+            }
+            .onPreferenceChange(RemoteComposerHeightPreferenceKey.self) { height in
+                guard height > 0, abs(composerHeight - height) > 0.5 else { return }
+                let shouldStayAtBottom = isNearBottom
+                composerHeight = height
+                if shouldStayAtBottom {
+                    DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
+                }
+            }
             .task(id: sessionID) {
                 didInitialScroll = false
                 isNearBottom = true
@@ -354,10 +381,10 @@ private struct RemoteNarrativeRow: View {
                 }
 
                 if let text = item.text, !text.isEmpty {
-                    RemoteMarkdownText(markdown: text)
-                    .font(.subheadline)
-                    .foregroundStyle(isUser ? Color.white : (isPreamble ? Color.white.opacity(0.68) : Color.white.opacity(0.92)))
-                    .textSelection(.enabled)
+                    RemoteMarkdownText(
+                        markdown: text,
+                        textColor: UIColor.white.withAlphaComponent(isUser ? 1 : (isPreamble ? 0.68 : 0.92))
+                    )
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                     .background(
@@ -418,48 +445,135 @@ private struct RemoteTranscriptAttachments: View {
 
 struct RemoteMarkdownText: View {
     let markdown: String
+    var textStyle: UIFont.TextStyle = .subheadline
+    var textColor: UIColor = .label
+    @Environment(\.dynamicTypeSize) private var typeSize
 
-    private var blocks: [RemoteMarkdownBlock] {
-        RemoteMarkdownDocumentParser.parse(markdown)
+    private enum Section {
+        case prose([RemoteMarkdownBlock])
+        case rich(RemoteMarkdownBlock)
+    }
+
+    private var sections: [Section] {
+        var sections: [Section] = []
+        var prose: [RemoteMarkdownBlock] = []
+        for block in RemoteMarkdownDocumentParser.parse(markdown) {
+            switch block {
+            case .paragraph, .heading, .list:
+                prose.append(block)
+            case .blockQuote, .codeBlock, .table, .image, .thematicBreak:
+                if !prose.isEmpty {
+                    sections.append(.prose(prose))
+                    prose.removeAll()
+                }
+                sections.append(.rich(block))
+            }
+        }
+        if !prose.isEmpty { sections.append(.prose(prose)) }
+        return sections
+    }
+
+    private var traits: UITraitCollection {
+        UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(typeSize))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                blockView(block)
+            ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                switch section {
+                case let .prose(blocks):
+                    RemoteSelectableText(content: prose(blocks))
+                case let .rich(block):
+                    richBlock(block)
+                }
             }
         }
     }
 
-    @ViewBuilder
-    private func blockView(_ block: RemoteMarkdownBlock) -> some View {
-        switch block {
-        case let .paragraph(text):
-            RemoteInlineMarkdownText(markdown: text)
-        case let .heading(level, text):
-            RemoteInlineMarkdownText(markdown: text)
-                .font(headingFont(for: level))
-                .accessibilityAddTraits(.isHeader)
-        case let .list(items):
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 7) {
-                        Text(markerText(for: item.marker))
-                            .font(.subheadline.monospacedDigit())
-                            .frame(minWidth: 18, alignment: .trailing)
-                        RemoteInlineMarkdownText(markdown: item.text)
-                    }
-                    .padding(.leading, CGFloat(item.depth) * 16)
-                    .accessibilityElement(children: .combine)
-                }
+    private func prose(_ blocks: [RemoteMarkdownBlock]) -> NSAttributedString {
+        let text = NSMutableAttributedString(string: "")
+        let font = UIFont.preferredFont(forTextStyle: textStyle, compatibleWith: traits)
+        for block in blocks {
+            if text.length > 0 {
+                text.append(NSAttributedString(string: "\n", attributes: [.font: font]))
             }
+            switch block {
+            case let .paragraph(content):
+                appendInline(content, font: font, spacing: 10, to: text)
+            case let .heading(level, content):
+                let headingStyle: UIFont.TextStyle = switch level {
+                case 1: .title2
+                case 2: .title3
+                case 3: .headline
+                default: .subheadline
+                }
+                let heading = UIFont.preferredFont(forTextStyle: headingStyle, compatibleWith: traits)
+                appendInline(
+                    content, font: RemoteSelectableText.styled(heading, traits: .traitBold),
+                    spacing: 10, headingLevel: level, to: text
+                )
+            case let .list(items):
+                for (index, item) in items.enumerated() {
+                    if index > 0 { text.append(NSAttributedString(string: "\n", attributes: [.font: font])) }
+                    let marker = switch item.marker {
+                    case .bullet: "•"
+                    case let .ordered(number): "\(number)."
+                    }
+                    appendInline(
+                        "\(marker)\t\(item.text)", font: font,
+                        spacing: index == items.count - 1 ? 10 : 5,
+                        listIndent: CGFloat(item.depth) * 16, to: text
+                    )
+                }
+            default:
+                break
+            }
+        }
+        return text
+    }
+
+    private func appendInline(
+        _ markdown: String, font: UIFont, spacing: CGFloat, listIndent: CGFloat? = nil,
+        headingLevel: Int? = nil, to text: NSMutableAttributedString
+    ) {
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = spacing
+        if let listIndent {
+            style.firstLineHeadIndent = listIndent
+            style.headIndent = listIndent + 22
+            style.tabStops = [NSTextTab(textAlignment: .left, location: style.headIndent)]
+        }
+        let content = NSMutableAttributedString(attributedString: RemoteSelectableText.markdown(markdown, font: font, color: textColor))
+        let range = NSRange(location: 0, length: content.length)
+        content.addAttribute(.paragraphStyle, value: style, range: range)
+        if let headingLevel {
+            content.addAttribute(.accessibilityTextHeadingLevel, value: headingLevel, range: range)
+        }
+        text.append(content)
+    }
+
+    private func inline(_ markdown: String, color: UIColor? = nil, bold: Bool = false, wraps: Bool = true) -> RemoteSelectableText {
+        let font = UIFont.preferredFont(forTextStyle: textStyle, compatibleWith: traits)
+        return RemoteSelectableText(
+            content: RemoteSelectableText.markdown(
+                markdown, font: bold ? RemoteSelectableText.styled(font, traits: .traitBold) : font,
+                color: color ?? textColor
+            ),
+            wraps: wraps
+        )
+    }
+
+    @ViewBuilder
+    private func richBlock(_ block: RemoteMarkdownBlock) -> some View {
+        switch block {
         case let .blockQuote(text):
-            HStack(alignment: .top, spacing: 9) {
+            inline(text, color: .secondaryLabel)
+            .padding(.leading, 9)
+            .overlay(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(Color.remoteWarmOrange.opacity(0.65))
                     .frame(width: 3)
-                RemoteInlineMarkdownText(markdown: text)
-                    .foregroundStyle(.secondary)
+                    .allowsHitTesting(false)
             }
         case let .codeBlock(language, code):
             RemoteCodeBlock(language: language, code: code)
@@ -468,14 +582,14 @@ struct RemoteMarkdownText: View {
                 Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
                     GridRow {
                         ForEach(Array(table.header.enumerated()), id: \.offset) { _, cell in
-                            RemoteInlineMarkdownText(markdown: cell).bold()
+                            inline(cell, bold: true, wraps: false)
                         }
                     }
                     Divider().gridCellUnsizedAxes(.horizontal)
                     ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
                         GridRow {
                             ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                                RemoteInlineMarkdownText(markdown: cell)
+                                inline(cell, wraps: false)
                             }
                         }
                     }
@@ -489,23 +603,8 @@ struct RemoteMarkdownText: View {
         case .thematicBreak:
             Divider()
                 .overlay(Color.white.opacity(0.16))
-        }
-    }
-
-    private func headingFont(for level: Int) -> Font {
-        switch level {
-        case 1: .title2.weight(.bold)
-        case 2: .title3.weight(.bold)
-        case 3: .headline.weight(.bold)
-        case 4: .subheadline.weight(.bold)
-        default: .subheadline.weight(.semibold)
-        }
-    }
-
-    private func markerText(for marker: RemoteMarkdownListItem.Marker) -> String {
-        switch marker {
-        case .bullet: "•"
-        case let .ordered(number): "\(number)."
+        default:
+            EmptyView()
         }
     }
 }
@@ -514,6 +613,7 @@ private struct RemoteCodeBlock: View {
     let language: String?
     let code: String
     @State private var copied = false
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -533,10 +633,15 @@ private struct RemoteCodeBlock: View {
                 .accessibilityLabel(copied ? "Copied" : "Copy code")
             }
             ScrollView(.horizontal) {
-                Text(code)
-                    .font(.system(.footnote, design: .monospaced))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: true, vertical: false)
+                let traits = UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(typeSize))
+                let size = UIFont.preferredFont(forTextStyle: .footnote, compatibleWith: traits).pointSize
+                RemoteSelectableText(
+                    content: NSAttributedString(string: code, attributes: [
+                        .font: UIFont.monospacedSystemFont(ofSize: size, weight: .regular),
+                        .foregroundColor: UIColor.label
+                    ]),
+                    wraps: false
+                )
             }
         }
         .padding(10)
@@ -576,18 +681,73 @@ private struct RemoteMarkdownImage: View {
     }
 }
 
-private struct RemoteInlineMarkdownText: View {
-    let markdown: String
+/// A read-only text view gives the transcript iOS selection handles and the native editing menu.
+struct RemoteSelectableText: UIViewRepresentable {
+    let content: NSAttributedString
+    var wraps = true
 
-    var body: some View {
-        if let attributed = try? AttributedString(
-            markdown: markdown,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
-            Text(attributed)
-        } else {
-            Text(markdown)
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.backgroundColor = .clear
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = false
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.linkTextAttributes = [.foregroundColor: UIColor.link, .underlineStyle: NSUnderlineStyle.single.rawValue]
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        guard view.attributedText != content else { return }
+        let range = view.selectedRange
+        let previous = view.attributedText?.string as NSString?
+        let next = content.string as NSString
+        view.attributedText = content
+        if range.length > 0, let previous, NSMaxRange(range) <= previous.length, NSMaxRange(range) <= next.length,
+           previous.substring(with: range) == next.substring(with: range) {
+            view.selectedRange = range
         }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        if content.length == 0 { return .zero }
+        let proposedWidth = proposal.width
+        let widthLimit = wraps ? (proposedWidth ?? .greatestFiniteMagnitude) : .greatestFiniteMagnitude
+        let bounds = content.boundingRect(
+            with: CGSize(width: widthLimit, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
+        )
+        let width = max(1, min(widthLimit, ceil(bounds.width) + 1))
+        let size = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+        return CGSize(width: width, height: ceil(size.height))
+    }
+
+    static func markdown(_ markdown: String, font: UIFont, color: UIColor) -> NSAttributedString {
+        let attributed = (try? AttributedString(markdown: markdown, options: .init(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace
+        ))) ?? AttributedString(markdown)
+        let result = NSMutableAttributedString(string: "")
+        for run in attributed.runs {
+            let intent = run.inlinePresentationIntent ?? []
+            var traits: UIFontDescriptor.SymbolicTraits = []
+            if intent.contains(.stronglyEmphasized) { traits.insert(.traitBold) }
+            if intent.contains(.emphasized) { traits.insert(.traitItalic) }
+            let base = intent.contains(.code) ? UIFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular) : font
+            var attributes: [NSAttributedString.Key: Any] = [.font: styled(base, traits: traits), .foregroundColor: color]
+            if intent.contains(.strikethrough) { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
+            if let link = run.link { attributes[.link] = link }
+            result.append(NSAttributedString(string: String(attributed[run.range].characters), attributes: attributes))
+        }
+        return result
+    }
+
+    static func styled(_ font: UIFont, traits: UIFontDescriptor.SymbolicTraits) -> UIFont {
+        let combined = font.fontDescriptor.symbolicTraits.union(traits)
+        guard !traits.isEmpty, let descriptor = font.fontDescriptor.withSymbolicTraits(combined) else { return font }
+        return UIFont(descriptor: descriptor, size: font.pointSize)
     }
 }
 
@@ -749,10 +909,7 @@ private struct RemoteActivityItemView: View {
                     Text(item.toolName ?? item.role.replacingOccurrences(of: "_", with: " ").capitalized)
                         .font(.caption.monospaced().weight(.semibold))
                     if let text = item.text, !text.isEmpty {
-                        RemoteMarkdownText(markdown: text)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
+                        RemoteMarkdownText(markdown: text, textStyle: .caption1, textColor: .secondaryLabel)
                     }
                 }
                 Spacer()
@@ -816,7 +973,9 @@ private struct RemoteToolDetails: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if showsSummary, let summary = detail.summaryText { RemoteMarkdownText(markdown: summary) }
+            if showsSummary, let summary = detail.summaryText {
+                RemoteMarkdownText(markdown: summary, textStyle: .caption1)
+            }
             payload("Arguments", detail.argumentsJSON)
             payload("Result", detail.resultJSON)
             if !detail.keyPaths.isEmpty {
@@ -826,11 +985,10 @@ private struct RemoteToolDetails: View {
             if let processID = detail.processID { LabeledContent("Process", value: processID) }
             if let thinking = detail.reasoning, !thinking.isEmpty {
                 Text("Reasoning").font(.caption.weight(.semibold))
-                RemoteMarkdownText(markdown: thinking)
+                RemoteMarkdownText(markdown: thinking, textStyle: .caption1)
             }
         }
         .font(.caption)
-        .textSelection(.enabled)
     }
 
     @ViewBuilder
@@ -851,6 +1009,8 @@ extension View {
 }
 
 struct RemoteChatComposer: View {
+    fileprivate static let buttonHeight: CGFloat = 36
+
     enum Destination {
         case newChat(workflowID: String?)
         case session(UUID, RemoteRunState)
@@ -938,7 +1098,7 @@ struct RemoteChatComposer: View {
 
             RemoteAttachmentDraftStrip(draft: attachments, isSending: pendingCommandID != nil)
 
-            TextField(placeholder, text: $message, axis: .vertical)
+            TextField("Send a Message...", text: $message, axis: .vertical)
                 .lineLimit(1...7)
                 .textFieldStyle(.plain)
                 .font(.body)
@@ -954,6 +1114,7 @@ struct RemoteChatComposer: View {
             HStack(spacing: 5) {
                 RemoteAttachmentPicker(
                     draft: attachments,
+                    buttonHeight: Self.buttonHeight,
                     isEnabled: policy.canAttach && model.canSendAttachments && pendingCommandID == nil,
                     onError: model.presentError
                 )
@@ -970,7 +1131,7 @@ struct RemoteChatComposer: View {
                         Image(systemName: "stop.fill")
                             .font(.caption.weight(.bold))
                             .foregroundStyle(.red)
-                            .frame(width: 30, height: 34)
+                            .frame(width: 30, height: Self.buttonHeight)
                     }
                     .buttonStyle(.plain)
                     .disabled(pendingCancelID != nil)
@@ -981,7 +1142,7 @@ struct RemoteChatComposer: View {
                     Image(systemName: "arrow.up")
                         .font(.body.weight(.semibold))
                         .foregroundStyle(canSend ? Color.black : Color.secondary)
-                        .frame(width: 36, height: 36)
+                        .frame(width: Self.buttonHeight, height: Self.buttonHeight)
                         .background(canSend ? Color.remoteWarmOrange : Color.primary.opacity(0.09), in: Circle())
                 }
                 .buttonStyle(.plain)
@@ -997,7 +1158,27 @@ struct RemoteChatComposer: View {
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 3)
-        .background(Color.remoteChatBackground, ignoresSafeAreaEdges: .bottom)
+        .background {
+            if sessionID != nil {
+                Rectangle()
+                    .fill(.regularMaterial)
+                    .overlay(alignment: .bottom) {
+                        Color.remoteChatBackground.opacity(0.45)
+                    }
+                    .mask {
+                        LinearGradient(
+                            stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.70)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+                    .padding(.top, -22)
+                    .ignoresSafeArea(.container, edges: .bottom)
+                    .allowsHitTesting(false)
+            } else {
+                Color.remoteChatBackground.ignoresSafeArea(.container, edges: .bottom)
+            }
+        }
         .onChange(of: model.commandActivity) { _, activity in
             if let pendingSend, let completion = activity.completion(for: pendingSend.id) {
                 self.pendingSend = nil
@@ -1045,16 +1226,6 @@ struct RemoteChatComposer: View {
                 )
             }
         )
-    }
-
-    private var placeholder: String {
-        if !model.canControlChat { return "Read only" }
-        switch policy.primaryOperation {
-        case .startRun?, .followUp?: return "Send a message…"
-        case .steer?: return "Steer this run…"
-        case .resume?: return "Resume with…"
-        default: return "Respond above"
-        }
     }
 
     private func send() {
@@ -1170,18 +1341,9 @@ private struct RemoteAgentSelectionBar: View {
             Button {
                 showsModelPicker = true
             } label: {
-                HStack(spacing: 5) {
-                    Text(modelLabel)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                }
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 7)
-                .frame(minHeight: 28)
-                .background(Color.primary.opacity(0.08), in: Capsule())
+                RemoteComposerControlLabel(title: modelLabel)
             }
+            .buttonStyle(.plain)
             .accessibilityLabel("Model")
             .accessibilityValue(modelLabel)
             .disabled(!hasSelectableModel)
@@ -1235,17 +1397,9 @@ private struct RemoteAgentSelectionBar: View {
                     .disabled(!canSelectEffort(effort.id))
                 }
             } label: {
-                HStack(spacing: 4) {
-                    Text(effortLabel)
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                }
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 7)
-                .frame(minHeight: 28)
-                .background(Color.primary.opacity(0.08), in: Capsule())
+                RemoteComposerControlLabel(title: effortLabel)
             }
+            .buttonStyle(.plain)
             .accessibilityLabel("Reasoning level")
             .accessibilityValue(effortLabel)
             .disabled(!effortOptions.contains { canSelectEffort($0.id) })
@@ -1277,16 +1431,9 @@ private struct RemoteToolsButton: View {
         Button {
             presentedCatalog = catalog
         } label: {
-            HStack(spacing: 4) {
-                Text("Tools")
-                Image(systemName: "chevron.down").font(.caption2.weight(.semibold))
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 7)
-            .frame(minHeight: 28)
-            .background(Color.primary.opacity(0.08), in: Capsule())
+            RemoteComposerControlLabel(title: "Tools")
         }
+        .buttonStyle(.plain)
         .disabled(isPending || catalog == nil)
         .sheet(isPresented: Binding(
             get: { presentedCatalog != nil },
@@ -1325,6 +1472,27 @@ private struct RemoteToolsButton: View {
                 }
                 .presentationDetents([.medium, .large])
             }
+        }
+    }
+}
+
+private struct RemoteComposerControlLabel: View {
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(title).lineLimit(1)
+            Image(systemName: "chevron.down")
+                .font(.caption2.weight(.semibold))
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(Color.remoteWarmOrange)
+        .padding(.horizontal, 7)
+        .frame(minHeight: RemoteChatComposer.buttonHeight)
+        .background(Color.primary.opacity(0.08), in: Capsule())
+        .transaction {
+            $0.animation = nil
+            $0.disablesAnimations = true
         }
     }
 }

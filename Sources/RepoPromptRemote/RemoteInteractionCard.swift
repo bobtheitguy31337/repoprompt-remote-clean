@@ -25,9 +25,7 @@ struct RemoteInteractionCard: View {
             .foregroundStyle(Color.remoteWarmOrange)
 
             if let prompt = interaction.prompt, !prompt.isEmpty {
-                Text(prompt)
-                    .font(.subheadline)
-                    .textSelection(.enabled)
+                RemoteMarkdownText(markdown: prompt)
             }
 
             if let reason = interaction.responseUnavailableReason {

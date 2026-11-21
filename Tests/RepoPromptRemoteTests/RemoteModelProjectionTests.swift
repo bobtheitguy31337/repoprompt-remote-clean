@@ -1,7 +1,49 @@
 import Foundation
 import RepoPromptRemoteProtocol
+import SwiftUI
+import UIKit
 import XCTest
 @testable import RepoPromptRemote
+
+@MainActor
+final class RemoteSelectableTextTests: XCTestCase {
+    func testProseUsesOneReadOnlyNativeTextViewWithSelectableRanges() throws {
+        let view = RemoteMarkdownText(markdown: """
+        First **paragraph**.
+
+        Second [paragraph](https://example.com).
+        """)
+        let host = UIHostingController(rootView: view)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 400))
+        window.rootViewController = host
+        window.isHidden = false
+        defer { window.isHidden = true }
+        host.view.layoutIfNeeded()
+
+        let nativeViews = textViews(in: host.view)
+        XCTAssertEqual(nativeViews.count, 1)
+        let textView = try XCTUnwrap(nativeViews.first)
+        XCTAssertTrue(textView.isSelectable)
+        XCTAssertFalse(textView.isEditable)
+        XCTAssertFalse(textView.isScrollEnabled)
+        XCTAssertEqual(textView.text, "First paragraph.\nSecond paragraph.")
+
+        let text = try XCTUnwrap(textView.text) as NSString
+        let range = text.range(of: "paragraph.\nSecond")
+        XCTAssertNotEqual(range.location, NSNotFound)
+        textView.selectedRange = range
+        XCTAssertEqual(text.substring(with: textView.selectedRange), "paragraph.\nSecond")
+
+        let finalWord = text.range(of: "paragraph", options: .backwards)
+        let link = textView.attributedText.attribute(.link, at: finalWord.location, effectiveRange: nil) as? URL
+        XCTAssertEqual(link?.absoluteString, "https://example.com")
+    }
+
+    private func textViews(in view: UIView) -> [UITextView] {
+        if let textView = view as? UITextView { return [textView] }
+        return view.subviews.flatMap(textViews(in:))
+    }
+}
 
 final class RemoteTranscriptTimelineTests: XCTestCase {
     func testRecentInitialOlderAndLatestPagesMergeByIdentity() {
