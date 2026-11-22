@@ -1307,6 +1307,8 @@ struct RemoteChatComposer: View {
                 .onSubmit(send)
                 .disabled(!model.canControlChat || policy.primaryOperation == nil)
 
+            Divider()
+
             HStack(spacing: 5) {
                 RemoteAttachmentPicker(
                     draft: attachments,
@@ -1678,15 +1680,17 @@ private struct RemoteComposerControlLabel: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Text(title).lineLimit(1)
+            Text(title)
+                .lineLimit(1)
+                .foregroundStyle(Color.primary)
             Image(systemName: "chevron.down")
                 .font(.caption2.weight(.semibold))
+                .foregroundStyle(Color.remoteWarmOrange)
         }
         .font(.subheadline.weight(.semibold))
-        .foregroundStyle(Color.remoteWarmOrange)
         .padding(.horizontal, 7)
         .frame(minHeight: RemoteChatComposer.buttonHeight)
-        .background(Color.primary.opacity(0.08), in: Capsule())
+        .contentShape(Rectangle())
         .transaction {
             $0.animation = nil
             $0.disablesAnimations = true
