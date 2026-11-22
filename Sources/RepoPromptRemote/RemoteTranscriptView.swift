@@ -1207,7 +1207,7 @@ extension View {
 }
 
 struct RemoteChatComposer: View {
-    fileprivate static let buttonHeight: CGFloat = 36
+    fileprivate static let buttonHeight: CGFloat = 33
 
     enum Destination {
         case newChat(workflowID: String?)
