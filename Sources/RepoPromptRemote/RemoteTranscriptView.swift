@@ -1346,7 +1346,7 @@ struct RemoteChatComposer: View {
                 .accessibilityLabel(policy.canCancel ? policy.primaryLabel : "Send")
             }
         }
-        .padding(10)
+        .padding(EdgeInsets(top: 14, leading: 10, bottom: 10, trailing: 10))
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 15))
         .overlay {
             RoundedRectangle(cornerRadius: 15).strokeBorder(.quaternary, lineWidth: 1)
