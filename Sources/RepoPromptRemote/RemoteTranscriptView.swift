@@ -1307,8 +1307,6 @@ struct RemoteChatComposer: View {
                 .onSubmit(send)
                 .disabled(!model.canControlChat || policy.primaryOperation == nil)
 
-            Divider()
-
             HStack(spacing: 5) {
                 RemoteAttachmentPicker(
                     draft: attachments,
