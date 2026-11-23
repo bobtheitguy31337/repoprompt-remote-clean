@@ -188,6 +188,24 @@ final class RemoteTranscriptTimelineTests: XCTestCase {
             ),
             .newActivity
         )
+        let refreshedTail = RemoteTranscriptItem(
+            id: uuid(3),
+            turnID: uuid(1003),
+            timestamp: Date(timeIntervalSince1970: 4),
+            sequenceIndex: 3,
+            kind: .activity,
+            semanticKind: .assistantPreamble,
+            role: "assistant",
+            text: "item 3",
+            toolStatus: "completed"
+        )
+        XCTAssertEqual(
+            RemoteTranscriptViewportUpdate.classify(
+                oldItems: oldItems,
+                newItems: [item(index: 2), refreshedTail]
+            ),
+            .tailUpdated
+        )
         XCTAssertEqual(
             RemoteTranscriptViewportUpdate.classify(
                 oldItems: oldItems,
@@ -195,6 +213,29 @@ final class RemoteTranscriptTimelineTests: XCTestCase {
             ),
             .preserve
         )
+    }
+
+    func testLiveOutputKeepsFollowingThroughLayoutChanges() {
+        var follow = RemoteTranscriptFollowState()
+        follow.updatePosition(isNearBottom: false, duringUserScroll: false)
+        XCTAssertTrue(follow.receive(.newActivity))
+        XCTAssertTrue(follow.receive(.tailUpdated))
+        XCTAssertTrue(follow.followsLatest)
+        XCTAssertFalse(follow.showsNewActivity)
+    }
+
+    func testReadingEarlierKeepsPositionUntilReturningNearTheBottom() {
+        var follow = RemoteTranscriptFollowState()
+        follow.updatePosition(isNearBottom: false, duringUserScroll: true)
+        XCTAssertFalse(follow.receive(.tailUpdated))
+        XCTAssertFalse(follow.showsNewActivity)
+        XCTAssertFalse(follow.receive(.newActivity))
+        XCTAssertTrue(follow.showsNewActivity)
+
+        follow.updatePosition(isNearBottom: true, duringUserScroll: true)
+        XCTAssertTrue(follow.followsLatest)
+        XCTAssertFalse(follow.showsNewActivity)
+        XCTAssertTrue(follow.receive(.newActivity))
     }
 
     func testDuplicateRowsAndStaleTaskCompletionAreNoOps() {

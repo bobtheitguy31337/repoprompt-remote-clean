@@ -8,6 +8,7 @@ private let transcriptBubbleRadius: CGFloat = 15
 enum RemoteTranscriptViewportUpdate: Equatable {
     case initial
     case preserve
+    case tailUpdated
     case newActivity
 
     static func classify(
@@ -22,8 +23,17 @@ enum RemoteTranscriptViewportUpdate: Equatable {
         let oldIDs = Set(oldItems.map(\.id))
         let hasAppendedItem = newItems.index(after: tailIndex) < newItems.endIndex
             && newItems[newItems.index(after: tailIndex)...].contains { !oldIDs.contains($0.id) }
-        let tailChanged = !sameActivityContent(oldTail, newItems[tailIndex])
-        return hasAppendedItem || tailChanged ? .newActivity : .preserve
+        let updatedTail = newItems[tailIndex]
+        if hasAppendedItem || hasNewContent(in: updatedTail, after: oldTail) {
+            return .newActivity
+        }
+        return sameActivityContent(oldTail, updatedTail) ? .preserve : .tailUpdated
+    }
+
+    private static func hasNewContent(in item: RemoteTranscriptItem, after previous: RemoteTranscriptItem) -> Bool {
+        if let text = item.text, !text.isEmpty, text != previous.text { return true }
+        let previousAttachments = Set(previous.attachments?.map(\.id) ?? [])
+        return item.attachments?.contains { !previousAttachments.contains($0.id) } == true
     }
 
     private static func sameActivityContent(
@@ -44,15 +54,43 @@ enum RemoteTranscriptViewportUpdate: Equatable {
     }
 }
 
-private struct RemoteTranscriptBottomPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+struct RemoteTranscriptFollowState: Equatable {
+    static let bottomTolerance: CGFloat = 60
 
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+    private(set) var followsLatest = true
+    private(set) var showsNewActivity = false
+
+    mutating func updatePosition(isNearBottom: Bool, duringUserScroll: Bool) {
+        if isNearBottom {
+            resumeFollowing()
+        } else if duringUserScroll {
+            followsLatest = false
+        }
+    }
+
+    /// Returns whether an update should advance the viewport.
+    mutating func receive(_ update: RemoteTranscriptViewportUpdate) -> Bool {
+        guard update == .newActivity || update == .tailUpdated else { return false }
+        if followsLatest { return true }
+        if update == .newActivity { showsNewActivity = true }
+        return false
+    }
+
+    mutating func resumeFollowing() {
+        followsLatest = true
+        showsNewActivity = false
+    }
+}
+
+private struct RemoteTranscriptBottomPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat?
+
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
         value = nextValue()
     }
 }
 
-private struct RemoteComposerHeightPreferenceKey: PreferenceKey {
+private struct RemoteTranscriptViewportBottomPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -60,7 +98,25 @@ private struct RemoteComposerHeightPreferenceKey: PreferenceKey {
     }
 }
 
+@available(iOS 18.0, *)
+private struct RemoteTranscriptScrollMetrics: Equatable {
+    let isNearBottom: Bool
+    let contentHeight: CGFloat
+    let viewportHeight: CGFloat
+    let bottomInset: CGFloat
+
+    init(_ geometry: ScrollGeometry) {
+        contentHeight = geometry.contentSize.height
+        viewportHeight = geometry.containerSize.height
+        bottomInset = geometry.contentInsets.bottom
+        // The visible rect spans the full scroll view, including the composer inset.
+        isNearBottom = contentHeight + bottomInset - geometry.visibleRect.maxY <= RemoteTranscriptFollowState.bottomTolerance
+    }
+}
+
 struct RemoteChatView: View {
+    private static let transcriptBottomSpacing = RemoteChatComposer.transcriptFadeHeight + 8
+
     @EnvironmentObject private var model: RemoteAppModel
 
     let sessionID: UUID
@@ -72,12 +128,14 @@ struct RemoteChatView: View {
     @State private var expandedDetailIDs: Set<UUID> = []
     @State private var visibleItemIDs: Set<UUID> = []
     @State private var didInitialScroll = false
-    @State private var isNearBottom = true
-    @State private var showsNewActivity = false
+    @State private var follow = RemoteTranscriptFollowState()
+    @State private var isUserScrolling = false
+    @State private var wantsFollowAfterScroll = false
+    @GestureState private var isTrackingDrag = false
     @State private var prependAnchorID: UUID?
     @State private var itemCountBeforePrepend = 0
-    @State private var scrollViewportHeight: CGFloat = 0
-    @State private var composerHeight: CGFloat = 0
+    @State private var viewportBottom: CGFloat = 0
+    @State private var transcriptBottom: CGFloat?
 
     init(
         sessionID: UUID,
@@ -123,7 +181,7 @@ struct RemoteChatView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
+            trackScrolling(ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     olderPageControl(proxy: proxy)
 
@@ -149,83 +207,72 @@ struct RemoteChatView: View {
                     Color.clear
                         .frame(height: 1)
                         .background {
-                            GeometryReader { geometry in
-                                Color.clear.preference(
-                                    key: RemoteTranscriptBottomPreferenceKey.self,
-                                    value: geometry.frame(in: .named("transcript-scroll-space")).maxY
-                                )
+                            if #unavailable(iOS 18.0) {
+                                GeometryReader { geometry in
+                                    Color.clear.preference(
+                                        key: RemoteTranscriptBottomPreferenceKey.self,
+                                        value: geometry.frame(in: .named("transcript-scroll-space")).maxY
+                                    )
+                                }
                             }
                         }
-                        .onDisappear { isNearBottom = false }
-
-                    Color.clear
-                        .frame(height: composerHeight + 6)
                         .accessibilityHidden(true)
                         .id("transcript-bottom")
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 10)
-            }
-            .coordinateSpace(name: "transcript-scroll-space")
-            .background {
-                GeometryReader { geometry in
-                    Color.clear
-                        .onAppear { scrollViewportHeight = geometry.size.height }
-                        .onChange(of: geometry.size.height) { _, height in
-                            scrollViewportHeight = height
-                        }
-                }
-            }
-            .onPreferenceChange(RemoteTranscriptBottomPreferenceKey.self) { bottomY in
-                guard scrollViewportHeight > 0 else { return }
-                let wasNearBottom = isNearBottom
-                isNearBottom = bottomY <= scrollViewportHeight - composerHeight + 24
-                if isNearBottom, !wasNearBottom {
-                    showsNewActivity = false
-                }
-            }
+            }, proxy: proxy)
             .scrollDismissesKeyboard(.interactively)
-            .overlay(alignment: .bottomTrailing) {
-                if showsNewActivity {
-                    Button {
-                        withAnimation { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
-                        showsNewActivity = false
-                    } label: {
-                        Label("New activity", systemImage: "arrow.down")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .padding(.trailing, 14)
-                    .padding(.bottom, composerHeight + 12)
-                }
-            }
             .onChange(of: items) { oldItems, newItems in
                 handleItemsChanged(oldItems: oldItems, newItems: newItems, proxy: proxy)
             }
             .onChange(of: runNoticeState) { _, _ in
-                guard isNearBottom else { return }
-                proxy.scrollTo("transcript-bottom", anchor: .bottom)
+                followLatest(using: proxy)
             }
-            .overlay(alignment: .bottom) {
-                RemoteChatComposer(workspaceID: workspaceID, destination: .session(sessionID, runState))
-                    .background {
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 0) {
+                    Color.clear
+                        .frame(height: Self.transcriptBottomSpacing)
+                        .overlay(alignment: .topTrailing) {
+                            if follow.showsNewActivity {
+                                Button {
+                                    follow.resumeFollowing()
+                                    wantsFollowAfterScroll = false
+                                    withAnimation(.easeOut(duration: 0.2)) {
+                                        proxy.scrollTo("transcript-bottom", anchor: .bottom)
+                                    }
+                                } label: {
+                                    Label("New activity", systemImage: "arrow.down")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .padding(.trailing, 14)
+                            }
+                        }
+
+                    RemoteChatComposer(workspaceID: workspaceID, destination: .session(sessionID, runState))
+                }
+                .background {
+                    if #unavailable(iOS 18.0) {
                         GeometryReader { geometry in
-                            Color.clear.preference(key: RemoteComposerHeightPreferenceKey.self, value: geometry.size.height)
+                            Color.clear.preference(
+                                key: RemoteTranscriptViewportBottomPreferenceKey.self,
+                                value: geometry.frame(in: .named("transcript-scroll-space")).minY
+                            )
                         }
                     }
-            }
-            .onPreferenceChange(RemoteComposerHeightPreferenceKey.self) { height in
-                guard height > 0, abs(composerHeight - height) > 0.5 else { return }
-                let shouldStayAtBottom = isNearBottom
-                composerHeight = height
-                if shouldStayAtBottom {
-                    DispatchQueue.main.async { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
                 }
+            }
+            .coordinateSpace(name: "transcript-scroll-space")
+            .onPreferenceChange(RemoteTranscriptViewportBottomPreferenceKey.self) { bottom in
+                guard bottom > 0, abs(viewportBottom - bottom) > 0.5 else { return }
+                viewportBottom = bottom
+                followLatest(using: proxy)
             }
             .task(id: sessionID) {
                 didInitialScroll = false
-                isNearBottom = true
-                showsNewActivity = false
+                follow.resumeFollowing()
+                wantsFollowAfterScroll = false
                 prependAnchorID = nil
                 visibleItemIDs = []
                 if !items.isEmpty {
@@ -238,6 +285,62 @@ struct RemoteChatView: View {
         }
         .background(Color.remoteChatBackground.ignoresSafeArea())
         .navigationTitle(session?.title ?? title)
+    }
+
+    @ViewBuilder
+    private func trackScrolling<Content: View>(_ content: Content, proxy: ScrollViewProxy) -> some View {
+        if #available(iOS 18.0, *) {
+            content
+                .onScrollGeometryChange(for: RemoteTranscriptScrollMetrics.self, of: RemoteTranscriptScrollMetrics.init) { old, new in
+                    if old.isNearBottom != new.isNearBottom {
+                        follow.updatePosition(isNearBottom: new.isNearBottom, duringUserScroll: isUserScrolling)
+                    }
+                    if old.contentHeight != new.contentHeight || old.viewportHeight != new.viewportHeight || old.bottomInset != new.bottomInset {
+                        followLatest(using: proxy)
+                    }
+                }
+                .onScrollPhaseChange { previous, current, context in
+                    isUserScrolling = current == .interacting || current == .decelerating
+                    if previous == .interacting || previous == .decelerating {
+                        follow.updatePosition(isNearBottom: RemoteTranscriptScrollMetrics(context.geometry).isNearBottom, duringUserScroll: true)
+                        if !isUserScrolling, wantsFollowAfterScroll {
+                            wantsFollowAfterScroll = false
+                            followLatest(using: proxy)
+                        }
+                    }
+                }
+        } else {
+            content
+                .onPreferenceChange(RemoteTranscriptBottomPreferenceKey.self) { bottom in
+                    transcriptBottom = bottom
+                    updatePositionDuringDrag(isDragging: isTrackingDrag)
+                }
+                .simultaneousGesture(
+                    DragGesture()
+                        .updating($isTrackingDrag) { _, isDragging, _ in isDragging = true }
+                        .onEnded { _ in updatePositionDuringDrag(isDragging: true) }
+                )
+        }
+    }
+
+    private func updatePositionDuringDrag(isDragging: Bool) {
+        guard viewportBottom > 0 else { return }
+        let nearBottom = transcriptBottom.map { $0 - viewportBottom <= RemoteTranscriptFollowState.bottomTolerance } ?? false
+        follow.updatePosition(isNearBottom: nearBottom, duringUserScroll: isDragging)
+    }
+
+    private func followLatest(using proxy: ScrollViewProxy) {
+        guard follow.followsLatest, !isTrackingDrag else { return }
+        if isUserScrolling {
+            wantsFollowAfterScroll = true
+            return
+        }
+        DispatchQueue.main.async {
+            guard follow.followsLatest, !isUserScrolling, !isTrackingDrag else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
+                proxy.scrollTo("transcript-bottom", anchor: .bottom)
+            }
+        }
     }
 
     @ViewBuilder
@@ -339,20 +442,8 @@ struct RemoteChatView: View {
             return
         }
 
-        guard RemoteTranscriptViewportUpdate.classify(
-            oldItems: oldItems,
-            newItems: newItems
-        ) == .newActivity else { return }
-
-        if isNearBottom {
-            DispatchQueue.main.async {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    proxy.scrollTo("transcript-bottom", anchor: .bottom)
-                }
-            }
-        } else {
-            showsNewActivity = true
-        }
+        let update = RemoteTranscriptViewportUpdate.classify(oldItems: oldItems, newItems: newItems)
+        if follow.receive(update) { followLatest(using: proxy) }
     }
 }
 
@@ -972,7 +1063,7 @@ private struct RemoteRunNotice: View {
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .center, spacing: 8) {
             if isWorking {
                 ProgressView().controlSize(.small).tint(Color.remoteWarmOrange)
             } else {
@@ -1208,6 +1299,7 @@ extension View {
 
 struct RemoteChatComposer: View {
     fileprivate static let buttonHeight: CGFloat = 33
+    fileprivate static let transcriptFadeHeight: CGFloat = 22
 
     enum Destination {
         case newChat(workflowID: String?)
@@ -1367,7 +1459,7 @@ struct RemoteChatComposer: View {
                             endPoint: .bottom
                         )
                     }
-                    .padding(.top, -22)
+                    .padding(.top, -Self.transcriptFadeHeight)
                     .ignoresSafeArea(.container, edges: .bottom)
                     .allowsHitTesting(false)
             } else {
