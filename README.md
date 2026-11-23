@@ -161,3 +161,8 @@ docs/security/                       Threat model and operational guidance
 ## Contributing
 
 Changes that affect the wire contract must remain compatible with both this app and the [matching desktop fork](https://github.com/bobtheitguy31337/repoprompt-ce). Keep both repositories checked out as siblings, regenerate the Xcode project when needed, and run the protocol and relay tests before opening a pull request.
+
+## License
+
+RepoPrompt Remote is licensed under the [Apache License, Version 2.0](LICENSE).
+Third-party components retain their respective licenses. See the [Iroh transport notices](Packages/RepoPromptIrohTransport/THIRD_PARTY-NOTICES.md).
