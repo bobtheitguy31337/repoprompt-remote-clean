@@ -25,7 +25,7 @@ RepoPrompt Remote is a control surface—not a second agent runtime and not a ne
 | Component | Repository | Responsibility |
 | --- | --- | --- |
 | RepoPrompt CE for macOS | [`bobtheitguy31337/repoprompt-ce`](https://github.com/bobtheitguy31337/repoprompt-ce) | Runs agents, owns workspaces and credentials, and hosts the opt-in LAN Remote Gateway. |
-| RepoPrompt Remote for iOS | [`bobtheitguy31337/repoprompt-remote-clean`](https://github.com/bobtheitguy31337/repoprompt-remote-clean) | Displays desktop state and sends authorized controls to the paired Mac. |
+| RepoPrompt Remote for iOS | This repository | Displays desktop state and sends authorized controls to the paired Mac. |
 | Shared Swift protocol | [`Packages/RepoPromptRemoteProtocol`](Packages/RepoPromptRemoteProtocol) | Defines the Foundation-only snapshots, events, commands, and compatibility rules used by both apps. |
 
 The tested desktop revision is pinned in [`desktop-compatibility.json`](desktop-compatibility.json), along with the upstream CE commit it incorporates. The desktop vendors the same Swift protocol sources so it can build independently. This repository's CI compares both copies and their compatibility fixtures at that revision. Keep the repositories next to one another for local integration checks:
@@ -145,7 +145,7 @@ Pass a different desktop checkout path when using a worktree. The parity check f
 
 The CI workflow also generates the Xcode project and runs the app's unit tests on an available iOS Simulator.
 
-For deeper two-repository integration work, see the desktop fork's [remote-control architecture](https://github.com/bobtheitguy31337/repoprompt-ce/blob/main/docs/architecture/remote-control.md) and this repository's [security notes](docs/security/remote-threat-model.md).
+See the desktop fork's [remote-control architecture](https://github.com/bobtheitguy31337/repoprompt-ce/blob/d66b8ed36bcd281e770bfd848efa6f560f5af714/docs/architecture/remote-control.md) and this repository's [security notes](docs/security/remote-threat-model.md).
 
 ## Repository layout
 

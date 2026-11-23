@@ -4,7 +4,7 @@ This document describes the first-release trust boundary for the two agreed
 repositories:
 
 - Desktop: `bobtheitguy31337/repoprompt-ce`
-- Mobile: `bobtheitguy31337/repoprompt-remote-clean`
+- Mobile: this repository
 
 The Mac is the sole executor, authorization boundary, and source of truth. The
 phone is a paired control surface. The notification relay is an untrusted
