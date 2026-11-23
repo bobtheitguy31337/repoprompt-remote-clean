@@ -6,10 +6,9 @@ import RepoPromptRemoteProtocol
 /// Typed production client over authenticated Iroh QUIC streams. Each RPC is
 /// one bounded bidirectional stream; ordered events use framed replay polling
 /// from the reducer cursor so disconnects and stale cursors retain the same
-/// authoritative recovery semantics as the legacy adapter.
+/// authoritative recovery after a reconnect.
 final class RemoteIrohGatewayTransport: RemoteGatewayTransport, @unchecked Sendable {
     private static let unpairLogger = Logger(subsystem: "com.repoprompt.remote", category: "Unpair")
-    let kind = RemoteTransportKind.iroh
 
     private let endpoint: TransportEndpoint
     private let connection: TransportConnection
@@ -51,13 +50,15 @@ final class RemoteIrohGatewayTransport: RemoteGatewayTransport, @unchecked Senda
         identitySecret: Data,
         generation: UInt64
     ) async throws -> RemoteIrohGatewayTransport {
-        guard let binding = stored.irohBinding,
-              binding.wireVersion == RemoteWireProtocol.currentVersion,
-              let address = binding.serverAddress,
-              let addressJSON = address.transportAddressJSON,
-              address.endpointID == binding.expectedDesktopEndpointID
+        let binding = stored.irohBinding
+        guard binding.wireVersion == RemoteWireProtocol.currentVersion,
+              let addressJSON = binding.serverAddress.transportAddressJSON,
+              binding.serverAddress.endpointID == binding.expectedDesktopEndpointID
         else {
             throw RemoteIrohTransportError.bindingUnavailable
+        }
+        guard try endpointID(for: identitySecret) == binding.localMobileEndpointID else {
+            throw RemoteIrohTransportError.localIdentityChanged
         }
         let endpoint = try await RepoPromptIrohSpike.startApplication(
             secret: identitySecret,
@@ -127,7 +128,7 @@ final class RemoteIrohGatewayTransport: RemoteGatewayTransport, @unchecked Senda
                 encoding: RemotePairingHello(request: request)
             )
             // From this point onward the one-time secret may have been consumed
-            // even if the response is lost. Never silently retry over HTTPS.
+            // even if the response is lost. Request a fresh code after an ambiguous outcome.
             pairingRequestWasSent = true
             let responseFrame = try await send(
                 hello,
@@ -364,7 +365,7 @@ final class RemoteIrohGatewayTransport: RemoteGatewayTransport, @unchecked Senda
         if let error = response.error {
             if error.code == "snapshot_required" { throw RemoteGatewayError.snapshotRequired }
             if error.code == "unauthorized" { throw RemoteGatewayError.credentialRejected }
-            throw RemoteGatewayError.httpStatus(0, error)
+            throw RemoteGatewayError.requestRejected(error)
         }
         guard let result = response.result else { throw RemoteGatewayError.invalidResponse }
         do { return try decoder.decode(Response.self, from: result) }
@@ -426,7 +427,7 @@ final class RemoteIrohGatewayTransport: RemoteGatewayTransport, @unchecked Senda
             if error.code == "snapshot_required" { return RemoteGatewayError.snapshotRequired }
             if error.code == "unauthorized" { return RemoteGatewayError.credentialRejected }
             if error.code == "endpoint_mismatch" { return RemoteIrohTransportError.serverEndpointMismatch }
-            return RemoteGatewayError.httpStatus(0, error)
+            return RemoteGatewayError.requestRejected(error)
         }
         return RemoteIrohTransportError.unexpectedFrame
     }
@@ -444,6 +445,7 @@ final class RemoteIrohGatewayTransport: RemoteGatewayTransport, @unchecked Senda
 
 enum RemoteIrohTransportError: LocalizedError, Equatable {
     case bindingUnavailable
+    case localIdentityChanged
     case serverEndpointMismatch
     case unexpectedFrame
     case frameTooLarge
@@ -452,6 +454,7 @@ enum RemoteIrohTransportError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .bindingUnavailable: "The paired Mac has no usable Iroh endpoint binding."
+        case .localIdentityChanged: "The phone’s pairing identity changed. Pair with the Mac again."
         case .serverEndpointMismatch: "The authenticated Iroh endpoint did not match the paired Mac."
         case .unexpectedFrame: "The Mac returned an unexpected Iroh frame."
         case .frameTooLarge: "The Mac returned an oversized Iroh frame."

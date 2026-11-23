@@ -9,28 +9,13 @@ enum RemotePairingDecoder {
     private static let maximumSecretBytes = 256
     private static let maximumAddressBytes = 256
 
-    static func decode(_ rawValue: String, at date: Date = Date()) throws -> RemotePairingCode {
+    static func decode(_ rawValue: String, at date: Date = Date()) throws -> RemoteIrohPairingAdvertisement {
         let data = try payloadData(from: rawValue)
-        let decoder = JSONDecoder()
-
-        let code: RemotePairingCode
-        if let tagged = try? decoder.decode(RemotePairingCode.self, from: data) {
-            code = tagged
-        } else if let legacy = try? decoder.decode(RemotePairingAdvertisement.self, from: data) {
-            // Pre-Iroh QR payloads were untagged advertisements. Continue to
-            // accept their raw JSON, base64url, and rpremote:// forms.
-            code = .legacyLAN(legacy)
-        } else {
+        guard let advertisement = try? JSONDecoder().decode(RemoteIrohPairingAdvertisement.self, from: data) else {
             throw RemotePairingError.invalidQRCode
         }
-
-        switch code {
-        case let .legacyLAN(advertisement):
-            try validateLegacy(advertisement, at: date)
-        case let .iroh(advertisement):
-            try validateIroh(advertisement, at: date)
-        }
-        return code
+        try validateIroh(advertisement, at: date)
+        return advertisement
     }
 
     private static func payloadData(from rawValue: String) throws -> Data {
@@ -54,26 +39,6 @@ enum RemotePairingDecoder {
         throw RemotePairingError.invalidQRCode
     }
 
-    private static func validateLegacy(
-        _ advertisement: RemotePairingAdvertisement,
-        at date: Date
-    ) throws {
-        guard RemoteProtocol.supports(advertisement.protocolVersion) else {
-            throw RemotePairingError.unsupportedProtocol(advertisement.protocolVersion)
-        }
-        if let expiresAt = advertisement.expiresAt, date >= expiresAt {
-            throw RemotePairingError.expiredQRCode
-        }
-        guard isBoundedText(advertisement.desktopInstanceID, maximumBytes: maximumIdentifierBytes),
-              isBoundedText(advertisement.oneTimeSecret, maximumBytes: maximumSecretBytes),
-              advertisement.serviceName.map({ isBoundedText($0, maximumBytes: maximumIdentifierBytes) }) ?? true,
-              advertisement.host.map({ isBoundedText($0, maximumBytes: maximumIdentifierBytes) }) ?? true,
-              isHexEndpointOrFingerprint(advertisement.certificateSHA256)
-        else {
-            throw RemotePairingError.invalidQRCode
-        }
-    }
-
     private static func validateIroh(
         _ advertisement: RemoteIrohPairingAdvertisement,
         at date: Date
@@ -84,17 +49,13 @@ enum RemotePairingDecoder {
         guard date < advertisement.expiresAt else {
             throw RemotePairingError.expiredQRCode
         }
-        try validateLegacy(advertisement.legacyFallback, at: date)
         guard advertisement.alpn == RemoteProtocol.irohALPN,
-              isHexEndpointOrFingerprint(advertisement.server.endpointID),
-              !advertisement.oneTimeSecret.isEmpty,
-              advertisement.desktopInstanceID == advertisement.legacyFallback.desktopInstanceID,
-              advertisement.oneTimeSecret == advertisement.legacyFallback.oneTimeSecret,
-              advertisement.legacyFallback.expiresAt == advertisement.expiresAt,
+              isCanonicalEndpointID(advertisement.server.endpointID),
+              isBoundedText(advertisement.desktopInstanceID, maximumBytes: maximumIdentifierBytes),
+              isBoundedText(advertisement.oneTimeSecret, maximumBytes: maximumSecretBytes),
               advertisement.server.directAddresses.allSatisfy(isSupportedAddressText),
-              advertisement.server.transportAddressJSON.map({
-                  !$0.isEmpty && $0.utf8.count <= 16 * 1_024
-              }) ?? !advertisement.server.directAddresses.isEmpty
+              let addressJSON = advertisement.server.transportAddressJSON,
+              !addressJSON.isEmpty, addressJSON.utf8.count <= 16 * 1_024
         else {
             throw RemotePairingError.invalidQRCode
         }
@@ -130,11 +91,9 @@ enum RemotePairingDecoder {
             }
     }
 
-    private static func isHexEndpointOrFingerprint(_ value: String) -> Bool {
-        value.count == 64 && value.unicodeScalars.allSatisfy {
-            ("0" ... "9").contains(Character($0)) ||
-                ("a" ... "f").contains(Character($0)) ||
-                ("A" ... "F").contains(Character($0))
+    private static func isCanonicalEndpointID(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy {
+            ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
         }
     }
 

@@ -13,10 +13,8 @@ For an optional local development check, leave `APNS_PRODUCTION` unset so APNs
 uses the sandbox, and make `APNS_BUNDLE_ID` match the development-signed iOS
 app. Configure CE on the Mac with
 `http://127.0.0.1:8787/v1/notify`; the Mac resolves that loopback address and
-calls the relay—the iPhone does not. A notification is only an attention/wake
-signal: the phone must reconnect to the paired Mac over the trusted LAN for
-authoritative state. Exercise this only after Simulator manual pairing and the
-physical-device camera, Bonjour, and LAN flow work. It requires a registered
+calls the relay. A notification signals the phone to reconnect to the paired
+Mac over Iroh for authoritative state. Testing APNs requires a registered
 device, development provisioning with `aps-environment=development`, and local
 APNs credentials; never commit the key, team, or provisioning values.
 

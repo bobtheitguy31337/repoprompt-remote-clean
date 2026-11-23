@@ -220,15 +220,10 @@ final class RemoteAppModel: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var chatListTask: Task<Void, Never>?
     private var selectedHistoryWorkspaceID: String?
-    private var discovery: RemoteBonjourDiscovery?
     private var pairingTask: Task<Void, Never>?
     private var pairingAttemptID: UUID?
     private var unpairWork: RemoteUnpairWork?
     private var unpairWorkID: UUID?
-    private var pendingAdvertisement: RemotePairingAdvertisement?
-    private var pendingIrohAdvertisement: RemoteIrohPairingAdvertisement?
-    private var discoveredEndpoint: (host: String, port: Int)?
-    private var discoveryTargetDesktopID: String?
     private var transcriptInitialTasks: [UUID: Task<Void, Never>] = [:]
     private var transcriptLatestTasks: [UUID: Task<Void, Never>] = [:]
     private var transcriptOlderTasks: [UUID: Task<Void, Never>] = [:]
@@ -327,7 +322,6 @@ final class RemoteAppModel: ObservableObject {
         transcriptOlderTasks.values.forEach { $0.cancel() }
         transcriptDetailTasks.values.forEach { $0.cancel() }
         pairingTask?.cancel()
-        discovery?.stop()
         networkMonitor?.stop()
         transientErrorTask?.cancel()
         notificationObservers.forEach(NotificationCenter.default.removeObserver)
@@ -432,27 +426,15 @@ final class RemoteAppModel: ObservableObject {
         clearTransientError()
         showingPairing = true
         connectionState = .discovering
-        startDiscovery()
     }
 
     func handleQRCode(_ value: String) {
         guard pairingTask == nil else { return }
         do {
-            let pairingCode = try RemotePairingDecoder.decode(value)
-            switch pairingCode {
-            case let .legacyLAN(advertisement):
-                pendingAdvertisement = advertisement
-                pendingIrohAdvertisement = nil
-                clearTransientError()
-                startPairing(advertisement)
-            case let .iroh(advertisement):
-                pendingAdvertisement = advertisement.legacyFallback
-                pendingIrohAdvertisement = advertisement
-                clearTransientError()
-                startIrohPairing(advertisement)
-            }
+            let advertisement = try RemotePairingDecoder.decode(value)
+            clearTransientError()
+            startPairing(advertisement)
         } catch {
-            clearPendingPairingAdvertisement()
             presentError(error.localizedDescription)
         }
     }
@@ -462,10 +444,6 @@ final class RemoteAppModel: ObservableObject {
         pairingTask?.cancel()
         pairingTask = nil
         pairingAttemptID = nil
-        clearPendingPairingAdvertisement()
-        discovery?.stop()
-        discovery = nil
-        discoveryTargetDesktopID = nil
         if storedCredential == nil { connectionState = .unpaired }
     }
 
@@ -834,8 +812,7 @@ final class RemoteAppModel: ObservableObject {
                     )
                 }
                 guard let detailedItem = page.items.first(where: { $0.id == itemID }) else {
-                    throw RemoteGatewayError.httpStatus(
-                        404,
+                    throw RemoteGatewayError.requestRejected(
                         RemoteErrorResponse(
                             code: "transcript_item_not_found",
                             message: "That transcript detail is no longer available. Try refreshing and retrying.",
@@ -902,7 +879,7 @@ final class RemoteAppModel: ObservableObject {
                 return try await withImageReadSlot { try await gateway.imageAttachment(request) }
             } catch {
                 if delay == .milliseconds(750) || isExpectedCancellation(error) { throw error }
-                if case let RemoteGatewayError.httpStatus(_, response) = error, response?.retryable != true { throw error }
+                if case let RemoteGatewayError.requestRejected(response) = error, response.retryable != true { throw error }
             }
         }
         throw RemoteGatewayError.imageUnavailable
@@ -1200,30 +1177,40 @@ final class RemoteAppModel: ObservableObject {
         stored: StoredRemoteCredential,
         preferredGateway: (any RemoteGatewayTransport)?
     ) -> [RemoteUnpairAttempt] {
-        var attempts: [RemoteUnpairAttempt] = []
-
         if let preferredGateway {
-            let description = preferredGateway.kind == .iroh ? "active Iroh" : "active HTTPS"
-            attempts.append(RemoteUnpairAttempt(
-                transportDescription: description,
+            return [RemoteUnpairAttempt(
+                transportDescription: "Iroh",
                 run: { try await preferredGateway.unpair() },
                 cancel: { preferredGateway.close() }
-            ))
+            )]
         }
 
-        if let baseURL = baseURL(for: stored.advertisement, preferDiscoveredEndpoint: true) {
-            let transport = RemoteHTTPSGatewayTransport(
-                baseURL: baseURL,
-                credential: stored.credential,
-                certificateSHA256: stored.advertisement.certificateSHA256
-            )
-            attempts.append(RemoteUnpairAttempt(
-                transportDescription: "pinned HTTPS fallback",
-                run: { try await transport.unpair() },
-                cancel: { transport.close() }
-            ))
-        }
-        return attempts
+        // Capture the existing identity before the coordinator clears the local pairing.
+        guard let identity = try? irohIdentityStore.loadOrCreate() else { return [] }
+        irohGeneration &+= 1
+        let generation = irohGeneration
+        var transport: RemoteIrohGatewayTransport?
+        var cancelled = false
+        return [RemoteUnpairAttempt(
+            transportDescription: "Iroh reconnect",
+            run: {
+                let connected = try await RemoteIrohGatewayTransport.connect(
+                    stored: stored,
+                    identitySecret: identity.secret,
+                    generation: generation
+                )
+                guard !cancelled else {
+                    connected.close()
+                    throw CancellationError()
+                }
+                transport = connected
+                try await connected.unpair()
+            },
+            cancel: {
+                cancelled = true
+                transport?.close()
+            }
+        )]
     }
 
     private func clearLocalPairing() {
@@ -1273,11 +1260,6 @@ final class RemoteAppModel: ObservableObject {
         irohPathStatus = "Unknown"
         lastConnectionEvent = "Unpaired"
         showingPairing = false
-        pendingAdvertisement = nil
-        pendingIrohAdvertisement = nil
-        discovery?.stop()
-        discovery = nil
-        discoveryTargetDesktopID = nil
         connectionState = .unpaired
         clearTransientError()
     }
@@ -1286,7 +1268,6 @@ final class RemoteAppModel: ObservableObject {
         do {
             guard let stored = try credentialStore.load() else { return }
             storedCredential = stored
-            pendingAdvertisement = stored.advertisement
             connectionState = .disconnected
             await connect(using: stored)
         } catch {
@@ -1295,20 +1276,7 @@ final class RemoteAppModel: ObservableObject {
         }
     }
 
-    private func startIrohPairing(_ advertisement: RemoteIrohPairingAdvertisement) {
-        guard pairingTask == nil else { return }
-        let attemptID = UUID()
-        pairingAttemptID = attemptID
-        pairingTask = Task { [weak self] in
-            guard let self else { return }
-            await self.pairIroh(advertisement, attemptID: attemptID)
-            guard self.pairingAttemptID == attemptID else { return }
-            self.pairingAttemptID = nil
-            self.pairingTask = nil
-        }
-    }
-
-    private func startPairing(_ advertisement: RemotePairingAdvertisement) {
+    private func startPairing(_ advertisement: RemoteIrohPairingAdvertisement) {
         guard pairingTask == nil else { return }
         let attemptID = UUID()
         pairingAttemptID = attemptID
@@ -1321,14 +1289,13 @@ final class RemoteAppModel: ObservableObject {
         }
     }
 
-    private func pairIroh(
+    private func pair(
         _ advertisement: RemoteIrohPairingAdvertisement,
         attemptID: UUID
     ) async {
         guard pairingAttemptID == attemptID else { return }
         connectionState = .discovering
         var candidateTransport: RemoteIrohGatewayTransport?
-        var credentialIssued = false
         do {
             let identity = try irohIdentityStore.loadOrCreate()
             irohGeneration &+= 1
@@ -1339,7 +1306,6 @@ final class RemoteAppModel: ObservableObject {
                 deviceName: UIDevice.current.name
             )
             candidateTransport = transport
-            credentialIssued = true
             try Task.checkCancellation()
             guard pairingAttemptID == attemptID, isSceneActive else {
                 transport.close()
@@ -1349,11 +1315,9 @@ final class RemoteAppModel: ObservableObject {
                 desktopInstanceID: advertisement.desktopInstanceID,
                 deviceID: response.pairingResponse.deviceID,
                 credential: response.pairingResponse.credential,
-                advertisement: advertisement.legacyFallback.reconnectSafeCopy,
                 irohBinding: StoredRemoteIrohBinding(
                     expectedDesktopEndpointID: response.serverEndpointID,
                     localMobileEndpointID: response.clientEndpointID,
-                    lastSuccessfulPath: transport.irohPath,
                     serverAddress: advertisement.server
                 )
             )
@@ -1367,11 +1331,7 @@ final class RemoteAppModel: ObservableObject {
             gateway = transport
             candidateTransport = nil
             refreshChatList()
-            pendingAdvertisement = stored.advertisement
-            pendingIrohAdvertisement = nil
             showingPairing = false
-            discovery?.stop()
-            discovery = nil
             connectionState = .connected
             transportStatus = "Iroh"
             irohPathStatus = transport.irohPath?.rawValue ?? "unknown"
@@ -1382,109 +1342,13 @@ final class RemoteAppModel: ObservableObject {
         } catch {
             candidateTransport?.close()
             guard !isExpectedCancellation(error), pairingAttemptID == attemptID, isSceneActive else { return }
-            if !credentialIssued,
-               error as? RemoteIrohTransportError != .pairingOutcomeUnknown
-            {
-                await pair(advertisement.legacyFallback, attemptID: attemptID)
-                return
-            }
-            connectionState = .disconnected
+            connectionState = storedCredential == nil ? .unpaired : .disconnected
             lastConnectionEvent = connectionEvent(for: error)
             presentError(error.localizedDescription)
         }
     }
 
-    private func pair(_ advertisement: RemotePairingAdvertisement, attemptID: UUID) async {
-        guard pairingAttemptID == attemptID else { return }
-        guard let baseURL = baseURL(for: advertisement) else {
-            presentError(RemotePairingError.unavailableDesktop.localizedDescription)
-            return
-        }
-
-        connectionState = .discovering
-        let client = RemoteHTTPSGatewayTransport(
-            baseURL: baseURL,
-            certificateSHA256: advertisement.certificateSHA256
-        )
-        defer { client.close() }
-        let request = RemotePairingRequest(
-            desktopInstanceID: advertisement.desktopInstanceID,
-            oneTimeSecret: advertisement.oneTimeSecret,
-            deviceName: UIDevice.current.name
-        )
-
-        do {
-            let response = try await client.pair(request)
-            try Task.checkCancellation()
-            guard pairingAttemptID == attemptID else { return }
-            guard RemoteProtocol.supports(response.protocolVersion) else {
-                throw RemoteGatewayError.protocolMismatch(response.protocolVersion)
-            }
-            let stored = StoredRemoteCredential(
-                desktopInstanceID: advertisement.desktopInstanceID,
-                deviceID: response.deviceID,
-                credential: response.credential,
-                advertisement: advertisement.reconnectSafeCopy
-            )
-            // The Mac consumes the one-time secret when it returns the
-            // credential. Persist it immediately so a later snapshot failure
-            // never leaves the two sides with different pairing state.
-            try credentialStore.save(stored)
-            storedCredential = stored
-            let authenticatedClient = RemoteHTTPSGatewayTransport(
-                baseURL: baseURL,
-                credential: response.credential,
-                certificateSHA256: advertisement.certificateSHA256
-            )
-            // Only dismiss the scanner after the authenticated snapshot works.
-            do {
-                try await refreshSnapshot(using: authenticatedClient)
-            } catch {
-                authenticatedClient.close()
-                throw error
-            }
-            guard pairingAttemptID == attemptID, isSceneActive else {
-                authenticatedClient.close()
-                return
-            }
-            gateway = authenticatedClient
-            transportStatus = "LAN HTTPS (fallback)"
-            irohPathStatus = "Unknown"
-            refreshChatList()
-            pendingAdvertisement = stored.advertisement
-            showingPairing = false
-            discovery?.stop()
-            discovery = nil
-            connectionState = .connected
-            lastConnectionEvent = "Connected to Mac"
-            startEventStream()
-            refreshDiagnostics()
-            registerPendingNotificationIfPossible()
-        } catch {
-            guard !isExpectedCancellation(error) else { return }
-            guard pairingAttemptID == attemptID else { return }
-            if !shouldRetainPairingAdvertisement(after: error) {
-                clearPendingPairingAdvertisement()
-            }
-            connectionState = .disconnected
-            lastConnectionEvent = connectionEvent(for: error)
-            presentError(error.localizedDescription)
-        }
-    }
-
-    private func clearPendingPairingAdvertisement() {
-        pendingAdvertisement = nil
-        pendingIrohAdvertisement = nil
-    }
-
-    private func shouldRetainPairingAdvertisement(
-        after error: Error
-    ) -> Bool {
-        if error is URLError { return true }
-        return error as? RemotePairingError == .unavailableDesktop
-    }
-
-    private func connect(using stored: StoredRemoteCredential, allowDiscovery: Bool = true) async {
+    private func connect(using stored: StoredRemoteCredential) async {
         guard isSceneActive,
               connectionState != .connected,
               activeConnectionAttemptID == nil,
@@ -1494,175 +1358,50 @@ final class RemoteAppModel: ObservableObject {
         let attemptID = UUID()
         activeConnectionAttemptID = attemptID
         defer {
-            if activeConnectionAttemptID == attemptID {
-                activeConnectionAttemptID = nil
-            }
+            if activeConnectionAttemptID == attemptID { activeConnectionAttemptID = nil }
         }
 
-        if stored.irohBinding != nil {
-            var candidateIrohTransport: RemoteIrohGatewayTransport?
-            do {
-                let identity = try irohIdentityStore.loadOrCreate()
-                if identity.origin != .replacedCorruptValue {
-                    irohGeneration &+= 1
-                    let transport = try await RemoteIrohGatewayTransport.connect(
-                        stored: stored,
-                        identitySecret: identity.secret,
-                        generation: irohGeneration
-                    )
-                    candidateIrohTransport = transport
-                    guard activeConnectionAttemptID == attemptID, isSceneActive else {
-                        transport.close()
-                        return
-                    }
-                    try await refreshSnapshot(
-                        using: transport,
-                        expectedConnectionAttemptID: attemptID
-                    )
-                    guard activeConnectionAttemptID == attemptID, isSceneActive else {
-                        transport.close()
-                        return
-                    }
-                    gateway = transport
-                    candidateIrohTransport = nil
-                    if snapshot?.transcriptRevisionEpoch == nil, let visibleSessionID {
-                        refreshLatestTranscript(for: visibleSessionID, revision: nil)
-                    }
-                    refreshChatList()
-                    connectionState = .connected
-                    transportStatus = "Iroh"
-                    irohPathStatus = transport.irohPath?.rawValue ?? "unknown"
-                    lastConnectionEvent = "Reconnected to Mac with Iroh"
-                    clearTransientError()
-                    discovery?.stop()
-                    discovery = nil
-                    discoveryTargetDesktopID = nil
-                    startEventStream()
-                    refreshDiagnostics()
-                    registerPendingNotificationIfPossible()
-                    return
-                }
-                let downgraded = StoredRemoteCredential(
-                    desktopInstanceID: stored.desktopInstanceID,
-                    deviceID: stored.deviceID,
-                    credential: stored.credential,
-                    advertisement: stored.advertisement
-                )
-                try credentialStore.save(downgraded)
-                storedCredential = downgraded
-            } catch {
-                candidateIrohTransport?.close()
-                guard activeConnectionAttemptID == attemptID, isSceneActive else { return }
-                lastConnectionEvent = "Iroh unavailable; trying LAN HTTPS"
-            }
-        }
-
-        guard activeConnectionAttemptID == attemptID, isSceneActive else { return }
-        guard let baseURL = baseURL(
-            for: stored.advertisement,
-            preferDiscoveredEndpoint: !allowDiscovery
-        ) else {
-            endConnectionCycle()
-            connectionState = .disconnected
-            if allowDiscovery {
-                startDiscovery(targetDesktopID: stored.desktopInstanceID)
-            }
-            return
-        }
-        let client = RemoteHTTPSGatewayTransport(
-            baseURL: baseURL,
-            credential: stored.credential,
-            certificateSHA256: stored.advertisement.certificateSHA256
-        )
+        var candidate: RemoteIrohGatewayTransport?
         do {
-            try await refreshSnapshot(
-                using: client,
-                expectedConnectionAttemptID: attemptID
+            let identity = try irohIdentityStore.loadOrCreate()
+            irohGeneration &+= 1
+            let transport = try await RemoteIrohGatewayTransport.connect(
+                stored: stored,
+                identitySecret: identity.secret,
+                generation: irohGeneration
             )
+            candidate = transport
             guard activeConnectionAttemptID == attemptID, isSceneActive else {
-                client.close()
+                transport.close()
                 return
             }
-            gateway = client
-            transportStatus = stored.irohBinding == nil ? "LAN HTTPS" : "LAN HTTPS (fallback)"
-            irohPathStatus = "Unknown"
-            if snapshot?.transcriptRevisionEpoch == nil, let visibleSessionID {
-                // A legacy CE restart can reuse or exceed its previous cursor.
-                // Refresh visible content on every reconnect instead of trusting
-                // cross-process revision comparisons that have no epoch.
-                refreshLatestTranscript(for: visibleSessionID, revision: nil)
+            try await refreshSnapshot(using: transport, expectedConnectionAttemptID: attemptID)
+            guard activeConnectionAttemptID == attemptID, isSceneActive else {
+                transport.close()
+                return
             }
+            gateway = transport
             refreshChatList()
             connectionState = .connected
-            lastConnectionEvent = "Reconnected to Mac"
+            transportStatus = "Iroh"
+            irohPathStatus = transport.irohPath?.rawValue ?? "unknown"
+            lastConnectionEvent = "Reconnected to Mac with Iroh"
             clearTransientError()
-            discovery?.stop()
-            discovery = nil
-            discoveryTargetDesktopID = nil
             startEventStream()
             refreshDiagnostics()
             registerPendingNotificationIfPossible()
-            Task { [weak self] in
-                await self?.migrateIrohBindingIfAvailable(stored: stored, https: client)
-            }
         } catch {
-            client.close()
-            guard activeConnectionAttemptID == attemptID, isSceneActive else { return }
-            guard !isExpectedCancellation(error) else { return }
-            endConnectionCycle()
-            connectionState = .disconnected
-            lastConnectionEvent = connectionEvent(for: error)
-            if allowDiscovery {
-                startDiscovery(targetDesktopID: stored.desktopInstanceID)
+            candidate?.close()
+            guard activeConnectionAttemptID == attemptID, isSceneActive, !isExpectedCancellation(error) else { return }
+            switch error {
+            case RemoteGatewayError.credentialRejected, RemoteIrohTransportError.localIdentityChanged:
+                clearLocalPairing()
+                presentError(error.localizedDescription)
+            default:
+                endConnectionCycle()
+                connectionState = .disconnected
+                lastConnectionEvent = connectionEvent(for: error)
             }
-        }
-    }
-
-    private func migrateIrohBindingIfAvailable(
-        stored: StoredRemoteCredential,
-        https: RemoteHTTPSGatewayTransport
-    ) async {
-        guard storedCredential?.desktopInstanceID == stored.desktopInstanceID else { return }
-        do {
-            let bootstrap = try await https.transportBootstrap()
-            guard bootstrap.desktopInstanceID == stored.desktopInstanceID,
-                  bootstrap.wireVersion == RemoteWireProtocol.currentVersion,
-                  !bootstrap.server.endpointID.isEmpty,
-                  bootstrap.server.transportAddressJSON.map({
-                      !$0.isEmpty && $0.utf8.count <= 16 * 1_024
-                  }) ?? false
-            else { return }
-            let identity = try irohIdentityStore.loadOrCreate()
-            let localEndpointID = try RemoteIrohGatewayTransport.endpointID(for: identity.secret)
-            let response = try await https.bindIrohEndpoint(RemoteIrohBindingRequest(
-                desktopInstanceID: stored.desktopInstanceID,
-                deviceID: stored.deviceID,
-                expectedServerEndpointID: bootstrap.server.endpointID,
-                clientEndpointID: localEndpointID
-            ))
-            guard response.desktopInstanceID == stored.desktopInstanceID,
-                  response.deviceID == stored.deviceID,
-                  response.serverEndpointID == bootstrap.server.endpointID,
-                  response.clientEndpointID == localEndpointID
-            else { return }
-            let updated = StoredRemoteCredential(
-                desktopInstanceID: stored.desktopInstanceID,
-                deviceID: stored.deviceID,
-                credential: stored.credential,
-                advertisement: stored.advertisement,
-                irohBinding: StoredRemoteIrohBinding(
-                    expectedDesktopEndpointID: response.serverEndpointID,
-                    localMobileEndpointID: response.clientEndpointID,
-                    serverAddress: bootstrap.server
-                )
-            )
-            try credentialStore.save(updated)
-            if storedCredential?.desktopInstanceID == stored.desktopInstanceID {
-                storedCredential = updated
-            }
-        } catch {
-            // Old desktops return 404 and degraded new desktops can return 503.
-            // Either case intentionally leaves the live HTTPS pairing untouched.
         }
     }
 
@@ -1932,7 +1671,7 @@ final class RemoteAppModel: ObservableObject {
                 guard !isExpectedCancellation(error) else { return }
                 if let gatewayError = error as? RemoteGatewayError {
                     if request.operation == .respond,
-                       case .httpStatus(409, _) = gatewayError
+                       case let .requestRejected(response) = gatewayError, response.code == "command_rejected"
                     {
                         try? await refreshSnapshot()
                         presentError("That interaction is no longer active. Refreshed from the Mac.")
@@ -2015,9 +1754,7 @@ final class RemoteAppModel: ObservableObject {
             eventLoop: while !Task.isCancelled {
                 do {
                     guard let gateway = self.gateway else { return }
-                    if gateway.kind == .iroh {
-                        self.irohPathStatus = gateway.irohPath?.rawValue ?? "unknown"
-                    }
+                    self.irohPathStatus = gateway.irohPath?.rawValue ?? "unknown"
                     let events = gateway.events(after: self.reducer.cursor)
                     for try await event in events {
                         guard !Task.isCancelled else { return }
@@ -2066,53 +1803,6 @@ final class RemoteAppModel: ObservableObject {
         }
     }
 
-    private func startDiscovery(targetDesktopID: String? = nil) {
-        discovery?.stop()
-        discoveryTargetDesktopID = targetDesktopID
-        let browser = RemoteBonjourDiscovery(
-            onService: { [weak self] host, port, desktopInstanceID in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    if let targetDesktopID = self.discoveryTargetDesktopID,
-                       desktopInstanceID != targetDesktopID
-                    {
-                        return
-                    }
-                    self.discoveredEndpoint = (host, port)
-                    if self.showingPairing,
-                       let pendingAdvertisement = self.pendingAdvertisement,
-                       pendingAdvertisement.host == nil,
-                       desktopInstanceID == nil || desktopInstanceID == pendingAdvertisement.desktopInstanceID
-                    {
-                        self.startPairing(pendingAdvertisement)
-                    } else if !self.showingPairing,
-                              let stored = self.storedCredential,
-                              stored.desktopInstanceID == desktopInstanceID
-                    {
-                        await self.connect(using: stored, allowDiscovery: false)
-                    }
-                }
-            },
-            onError: { _ in }
-        )
-        discovery = browser
-        browser.start()
-    }
-
-    private func baseURL(
-        for advertisement: RemotePairingAdvertisement,
-        preferDiscoveredEndpoint: Bool = false
-    ) -> URL? {
-        let host = preferDiscoveredEndpoint ? discoveredEndpoint?.host ?? advertisement.host : advertisement.host ?? discoveredEndpoint?.host
-        let port = preferDiscoveredEndpoint ? discoveredEndpoint?.port ?? advertisement.port : advertisement.port ?? discoveredEndpoint?.port
-        guard let host, let port else { return nil }
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = host
-        components.port = port
-        return components.url
-    }
-
     private func connectionEvent(for error: Error) -> String {
         if error is RemoteGatewayError {
             switch error as? RemoteGatewayError {
@@ -2130,20 +1820,6 @@ final class RemoteAppModel: ObservableObject {
         }
         let nsError = error as NSError
         return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
-    }
-}
-
-private extension RemotePairingAdvertisement {
-    var reconnectSafeCopy: RemotePairingAdvertisement {
-        RemotePairingAdvertisement(
-            protocolVersion: protocolVersion,
-            desktopInstanceID: desktopInstanceID,
-            serviceName: serviceName,
-            host: host,
-            port: port,
-            certificateSHA256: certificateSHA256,
-            oneTimeSecret: ""
-        )
     }
 }
 

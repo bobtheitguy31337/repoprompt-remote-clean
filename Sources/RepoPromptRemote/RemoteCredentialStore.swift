@@ -6,20 +6,17 @@ struct StoredRemoteIrohBinding: Codable, Equatable {
     let expectedDesktopEndpointID: String
     let localMobileEndpointID: String
     let wireVersion: Int
-    let lastSuccessfulPath: RemoteIrohPathKind?
-    let serverAddress: RemoteIrohEndpointAddress?
+    let serverAddress: RemoteIrohEndpointAddress
 
     init(
         expectedDesktopEndpointID: String,
         localMobileEndpointID: String,
         wireVersion: Int = RemoteWireProtocol.currentVersion,
-        lastSuccessfulPath: RemoteIrohPathKind? = nil,
-        serverAddress: RemoteIrohEndpointAddress? = nil
+        serverAddress: RemoteIrohEndpointAddress
     ) {
         self.expectedDesktopEndpointID = expectedDesktopEndpointID
         self.localMobileEndpointID = localMobileEndpointID
         self.wireVersion = wireVersion
-        self.lastSuccessfulPath = lastSuccessfulPath
         self.serverAddress = serverAddress
     }
 }
@@ -28,20 +25,17 @@ struct StoredRemoteCredential: Codable, Equatable {
     let desktopInstanceID: String
     let deviceID: String
     let credential: String
-    let advertisement: RemotePairingAdvertisement
-    let irohBinding: StoredRemoteIrohBinding?
+    let irohBinding: StoredRemoteIrohBinding
 
     init(
         desktopInstanceID: String,
         deviceID: String,
         credential: String,
-        advertisement: RemotePairingAdvertisement,
-        irohBinding: StoredRemoteIrohBinding? = nil
+        irohBinding: StoredRemoteIrohBinding
     ) {
         self.desktopInstanceID = desktopInstanceID
         self.deviceID = deviceID
         self.credential = credential
-        self.advertisement = advertisement
         self.irohBinding = irohBinding
     }
 }

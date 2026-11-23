@@ -27,27 +27,18 @@ interaction.
 
 ### QR interception or replay
 
-The QR payload contains a short-lived one-time secret and the desktop
-certificate fingerprint, never the long-lived bearer credential. Pairing
-requires the secret, desktop instance ID, protocol compatibility, and a TLS
-connection whose certificate matches the advertised fingerprint. The desktop
-clears the secret after a successful pairing or expiry.
+The QR payload contains the Mac's Iroh endpoint address and a short-lived,
+single-use pairing secret. The phone verifies the Mac's endpoint identity
+before sending the secret, and the Mac verifies the phone's authenticated
+endpoint identity before accepting it. The Mac issues the device credential
+only after successful pairing.
 
-### Transport eavesdropping, impersonation, or downgrade
+### Transport eavesdropping or impersonation
 
-The legacy gateway uses TLS 1.2 or newer with a locally generated identity. The
-phone pins the exact certificate fingerprint recorded during pairing. Iroh uses
-a RepoPrompt-specific ALPN and end-to-end authenticated QUIC. The phone verifies
-the connected Mac endpoint ID against the QR or stored binding before sending a
-pairing or bearer frame. The Mac rejects an unknown peer endpoint before calling
-the application router, then rechecks the endpoint, device ID, bearer, expiry,
-and authority for every RPC.
-
-An Iroh QR retains the pinned HTTPS advertisement, and legacy pairings can bind
-an Iroh endpoint only through already authenticated HTTPS. Losing an Iroh key
-clears only that endpoint binding; it does not silently trust a replacement or
-delete the HTTPS credential. HTTPS fallback is therefore authenticated, visible
-in diagnostics, and reversible rather than an unauthenticated downgrade.
+Iroh uses authenticated QUIC with a RepoPrompt-specific ALPN. Each request
+must come from the paired endpoint and present the current device ID and
+unexpired credential. The application router also enforces per-command
+authority. Replacing an endpoint key requires pairing again.
 
 Iroh relay operators can observe endpoint transport metadata and timing, but
 QUIC application frames remain end-to-end encrypted. RepoPrompt adds no relay
@@ -75,12 +66,9 @@ they are intentionally not committed to either repository.
 
 ### Malformed or oversized requests
 
-The legacy adapter parses bounded HTTP bodies, rejects malformed content
-lengths, and drops connections whose buffered request exceeds one megabyte.
-The Iroh bridge rejects oversized length prefixes before allocation; Swift also
-validates complete encoded client/event frames, bounds responses and concurrent
-streams, and rejects unsupported wire versions before routing. HTTPS responses
-use `Cache-Control: no-store` and close after each bounded request.
+The Iroh bridge rejects oversized length prefixes before allocation. Swift
+validates complete encoded frames, bounds responses and concurrent streams,
+and rejects unsupported wire versions before routing.
 
 ### Stale or duplicated state
 
@@ -110,6 +98,6 @@ before presenting authoritative state.
 
 Use the Remote settings diagnostics screen to confirm gateway state, last
 successful request, event cursor, paired-device state, notification
-registration, Iroh endpoint/path/fallback state, relay configuration, and the
+registration, Iroh endpoint and path, relay configuration, and the
 last transport error. If a phone is lost, revoke it from the Mac before pairing
 another device.

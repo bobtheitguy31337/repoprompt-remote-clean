@@ -24,7 +24,7 @@ RepoPrompt Remote is a control surface—not a second agent runtime and not a ne
 
 | Component | Repository | Responsibility |
 | --- | --- | --- |
-| RepoPrompt CE for macOS | [`bobtheitguy31337/repoprompt-ce`](https://github.com/bobtheitguy31337/repoprompt-ce) | Runs agents, owns workspaces and credentials, and hosts the opt-in LAN Remote Gateway. |
+| RepoPrompt CE for macOS | [`bobtheitguy31337/repoprompt-ce`](https://github.com/bobtheitguy31337/repoprompt-ce) | Runs agents, owns workspaces and credentials, and hosts the opt-in Iroh Remote Gateway. |
 | RepoPrompt Remote for iOS | This repository | Displays desktop state and sends authorized controls to the paired Mac. |
 | Shared Swift protocol | [`Packages/RepoPromptRemoteProtocol`](Packages/RepoPromptRemoteProtocol) | Defines the Foundation-only snapshots, events, commands, and compatibility rules used by both apps. |
 
@@ -41,7 +41,7 @@ The tested desktop revision is pinned in [`desktop-compatibility.json`](desktop-
 - A Mac capable of building and running the [compatible RepoPrompt CE fork](https://github.com/bobtheitguy31337/repoprompt-ce#source-build-requirements).
 - Xcode 26.3 or later and [XcodeGen](https://github.com/yonaskolb/XcodeGen).
 - iOS or iPadOS 17 or later, or an iOS Simulator.
-- A trusted, non-isolated local network shared by the Mac and physical device.
+- A network connection on both devices. A shared local network lets Iroh connect directly.
 - For a physical device, an Apple Developer team and a development signing profile.
 
 This repository currently provides a source build rather than an App Store download.
@@ -92,7 +92,7 @@ xcodebuild -project RepoPromptRemote.xcodeproj \
 1. In RepoPrompt CE on the Mac, open **Settings → Remote**.
 2. Enable pairing and generate a pairing code.
 3. On the iPhone or iPad, tap **Pair with Mac** and scan the QR code.
-4. Keep both devices on the same trusted LAN.
+4. Confirm the paired Mac appears in RepoPrompt Remote.
 
 For Simulator development, use **Copy pairing link** on the Mac and paste the `rpremote://` value into the Debug pairing field in the iOS app.
 
@@ -100,10 +100,10 @@ Only one phone is paired at a time. Pairing a replacement device invalidates the
 
 ## Security model
 
-Remote access is opt-in. The HTTPS transport uses the local network. Iroh can connect directly or use its configured relays when a direct path is unavailable.
+Remote access is opt-in. Iroh connects the paired devices directly or uses an Iroh relay when a direct path is unavailable.
 
 - Pairing uses a short-lived, one-time secret.
-- HTTPS pins the Mac’s locally generated TLS certificate. Iroh binds the paired endpoint identities.
+- Iroh authenticates both endpoint identities before sending credentials or routing a request.
 - Long-lived device credentials are stored in Keychain on both devices.
 - The Mac applies `observe`, `respond`, `control`, or `danger` authority to each request.
 - Secret answers are sent once and are excluded from remote snapshots and history.
@@ -141,11 +141,11 @@ xcodebuild -project RepoPromptRemote.xcodeproj -scheme RepoPromptRemote \
   CODE_SIGNING_ALLOWED=NO test
 ```
 
-Pass a different desktop checkout path when using a worktree. The parity check fails on changed, added, or removed Swift contract files and JSON fixtures; it does not replace desktop compilation or paired-device acceptance. Update `desktop-compatibility.json` to the tested desktop commit when delivering a coordinated update. Keep additive wire fields optional so previously paired clients continue decoding them.
+Pass a different desktop checkout path when using a worktree. The parity check fails on changed, added, or removed Swift contract files and JSON fixtures; it does not replace desktop compilation or paired-device acceptance. Update `desktop-compatibility.json` to the tested desktop commit when delivering a coordinated update.
 
 The CI workflow also generates the Xcode project and runs the app's unit tests on an available iOS Simulator.
 
-See the desktop fork's [remote-control architecture](https://github.com/bobtheitguy31337/repoprompt-ce/blob/d66b8ed36bcd281e770bfd848efa6f560f5af714/docs/architecture/remote-control.md) and this repository's [security notes](docs/security/remote-threat-model.md).
+See the desktop fork's [remote-control architecture](https://github.com/bobtheitguy31337/repoprompt-ce/blob/12eefd3beccf785c4b68986d685c2007cd4d47f2/docs/architecture/remote-control.md) and this repository's [security notes](docs/security/remote-threat-model.md).
 
 ## Repository layout
 

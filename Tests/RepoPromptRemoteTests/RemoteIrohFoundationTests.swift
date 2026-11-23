@@ -4,7 +4,7 @@ import RepoPromptRemoteProtocol
 import XCTest
 
 final class RemoteIrohFoundationTests: XCTestCase {
-    func testTaggedIrohPairingCodeDecodesFromJSONAndCopiedLink() throws {
+    func testIrohPairingCodeDecodesFromJSONAndCopiedLink() throws {
         let now = Date(timeIntervalSince1970: 1_000)
         let code = makeIrohCode(expiresAt: now.addingTimeInterval(300))
         let data = try JSONEncoder().encode(code)
@@ -29,42 +29,18 @@ final class RemoteIrohFoundationTests: XCTestCase {
         }
 
         let validExpiry = now.addingTimeInterval(300)
-        let legacy = makeLegacy(expiresAt: validExpiry)
-        for advertisement in [
-            RemoteIrohPairingAdvertisement(
-                desktopInstanceID: "desktop",
-                server: RemoteIrohEndpointAddress(endpointID: "not-an-endpoint"),
-                oneTimeSecret: legacy.oneTimeSecret,
-                expiresAt: validExpiry,
-                legacyFallback: legacy
-            ),
-            RemoteIrohPairingAdvertisement(
-                desktopInstanceID: "desktop",
-                server: RemoteIrohEndpointAddress(endpointID: endpointID("a")),
-                alpn: "wrong/alpn",
-                oneTimeSecret: legacy.oneTimeSecret,
-                expiresAt: validExpiry,
-                legacyFallback: legacy
-            ),
-            RemoteIrohPairingAdvertisement(
-                desktopInstanceID: "desktop",
-                server: RemoteIrohEndpointAddress(endpointID: endpointID("a")),
-                oneTimeSecret: "different-secret",
-                expiresAt: validExpiry,
-                legacyFallback: legacy
-            ),
-            RemoteIrohPairingAdvertisement(
-                desktopInstanceID: "desktop",
-                server: RemoteIrohEndpointAddress(
-                    endpointID: endpointID("a"),
-                    directAddresses: [String(repeating: "a", count: 257)]
-                ),
-                oneTimeSecret: legacy.oneTimeSecret,
-                expiresAt: validExpiry,
-                legacyFallback: legacy
-            )
+        for server in [
+            RemoteIrohEndpointAddress(endpointID: "not-an-endpoint", transportAddressJSON: "{}"),
+            RemoteIrohEndpointAddress(endpointID: endpointID("a")),
+            RemoteIrohEndpointAddress(endpointID: endpointID("a"), directAddresses: [String(repeating: "a", count: 257)], transportAddressJSON: "{}")
         ] {
-            let encoded = try JSONEncoder().encode(RemotePairingCode.iroh(advertisement))
+            let advertisement = RemoteIrohPairingAdvertisement(
+                desktopInstanceID: "desktop",
+                server: server,
+                oneTimeSecret: "one-time-secret",
+                expiresAt: validExpiry
+            )
+            let encoded = try JSONEncoder().encode(advertisement)
             XCTAssertThrowsError(
                 try RemotePairingDecoder.decode(String(decoding: encoded, as: UTF8.self), at: now)
             ) { error in
@@ -80,53 +56,20 @@ final class RemoteIrohFoundationTests: XCTestCase {
         }
     }
 
-    func testStoredMobileCredentialDecodesLegacyShapeAndRoundTripsOptionalBinding() throws {
-        struct LegacyStoredCredential: Codable {
-            let desktopInstanceID: String
-            let deviceID: String
-            let credential: String
-            let advertisement: RemotePairingAdvertisement
-        }
-
-        let legacy = LegacyStoredCredential(
+    func testStoredMobileCredentialRoundTripsWithRequiredIrohBinding() throws {
+        let endpoint = makeIrohCode(expiresAt: Date()).server
+        let stored = StoredRemoteCredential(
             desktopInstanceID: "desktop",
             deviceID: "device",
             credential: "bearer",
-            advertisement: makeLegacy(expiresAt: nil)
+            irohBinding: StoredRemoteIrohBinding(
+                expectedDesktopEndpointID: endpoint.endpointID,
+                localMobileEndpointID: endpointID("b"),
+                serverAddress: endpoint
+            )
         )
-        let decoded = try JSONDecoder().decode(
-            StoredRemoteCredential.self,
-            from: JSONEncoder().encode(legacy)
-        )
-        XCTAssertNil(decoded.irohBinding)
-
-        let binding = StoredRemoteIrohBinding(
-            expectedDesktopEndpointID: endpointID("a"),
-            localMobileEndpointID: endpointID("b"),
-            lastSuccessfulPath: .localDirect
-        )
-        let updated = StoredRemoteCredential(
-            desktopInstanceID: decoded.desktopInstanceID,
-            deviceID: decoded.deviceID,
-            credential: decoded.credential,
-            advertisement: decoded.advertisement,
-            irohBinding: binding
-        )
-        XCTAssertEqual(
-            try JSONDecoder().decode(
-                StoredRemoteCredential.self,
-                from: JSONEncoder().encode(updated)
-            ),
-            updated
-        )
-
-        let oldDecoder = try JSONDecoder().decode(
-            LegacyStoredCredential.self,
-            from: JSONEncoder().encode(updated)
-        )
-        XCTAssertEqual(oldDecoder.deviceID, updated.deviceID)
-        XCTAssertEqual(oldDecoder.credential, updated.credential)
-        XCTAssertEqual(oldDecoder.advertisement, updated.advertisement)
+        let data = try JSONEncoder().encode(stored)
+        XCTAssertEqual(try JSONDecoder().decode(StoredRemoteCredential.self, from: data), stored)
     }
 
     func testMobileIdentityStoreLoadsCreatesAndReplacesCorruptValues() throws {
@@ -256,7 +199,7 @@ final class RemoteIrohFoundationTests: XCTestCase {
     }
 
     @MainActor
-    func testOneTapUnpairUnreachableHTTPSIsDiagnosticOnly() async {
+    func testOneTapUnpairUnreachableIrohIsDiagnosticOnly() async {
         enum Unreachable: Error { case offline }
         var didCleanUpLocally = false
         var didClose = false
@@ -264,7 +207,7 @@ final class RemoteIrohFoundationTests: XCTestCase {
         var outcome: RemoteUnpairRemoteOutcome?
         let work = RemoteUnpairCoordinator.startBestEffort(
             attempts: [RemoteUnpairAttempt(
-                transportDescription: "pinned HTTPS fallback",
+                transportDescription: "Iroh reconnect",
                 run: { throw Unreachable.offline },
                 cancel: { didClose = true }
             )],
@@ -277,7 +220,7 @@ final class RemoteIrohFoundationTests: XCTestCase {
         XCTAssertTrue(didCleanUpLocally)
         await work.task.value
         XCTAssertTrue(didClose)
-        XCTAssertEqual(failureDescriptions, ["pinned HTTPS fallback"])
+        XCTAssertEqual(failureDescriptions, ["Iroh reconnect"])
         XCTAssertEqual(outcome, .failed)
     }
 
@@ -324,29 +267,16 @@ final class RemoteIrohFoundationTests: XCTestCase {
         XCTAssertEqual(order, ["local", "remote"])
     }
 
-    private func makeIrohCode(expiresAt: Date) -> RemotePairingCode {
-        let legacy = makeLegacy(expiresAt: expiresAt)
-        return .iroh(RemoteIrohPairingAdvertisement(
+    private func makeIrohCode(expiresAt: Date) -> RemoteIrohPairingAdvertisement {
+        RemoteIrohPairingAdvertisement(
             desktopInstanceID: "desktop",
             server: RemoteIrohEndpointAddress(
                 endpointID: endpointID("a"),
                 directAddresses: ["192.0.2.1:4433"],
-                relayURL: "https://relay.example"
+                relayURL: "https://relay.example",
+                transportAddressJSON: "{}"
             ),
-            oneTimeSecret: legacy.oneTimeSecret,
-            expiresAt: expiresAt,
-            legacyFallback: legacy
-        ))
-    }
-
-    private func makeLegacy(expiresAt: Date?) -> RemotePairingAdvertisement {
-        RemotePairingAdvertisement(
-            desktopInstanceID: "desktop",
-            serviceName: "RepoPrompt-desktop",
-            host: "192.0.2.1",
-            port: 8443,
-            certificateSHA256: endpointID("f"),
-            oneTimeSecret: "shared-one-time-secret",
+            oneTimeSecret: "one-time-secret",
             expiresAt: expiresAt
         )
     }

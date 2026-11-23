@@ -40,7 +40,7 @@ jobs:
       - name: Test shared protocol
         run: swift test --package-path Packages/RepoPromptRemoteProtocol
 
-  iroh-transport-spike:
+  iroh-transport:
     runs-on: macos-15
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
@@ -85,7 +85,7 @@ jobs:
         run: npm test
 
   simulator:
-    needs: iroh-transport-spike
+    needs: iroh-transport
     runs-on: macos-15
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
@@ -124,12 +124,3 @@ jobs:
           -sdk iphonesimulator
           -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}'
           CODE_SIGNING_ALLOWED=NO test
-      - name: Generate standalone Iroh spike project
-        run: xcodegen generate --spec Spikes/IrohTransportSpikeIOS/project.yml
-      - name: Build Iroh transport simulator spike
-        run: >-
-          xcodebuild -project Spikes/IrohTransportSpikeIOS/IrohTransportSpike.xcodeproj
-          -scheme IrohTransportSpike
-          -sdk iphonesimulator
-          -destination 'generic/platform=iOS Simulator'
-          CODE_SIGNING_ALLOWED=NO build

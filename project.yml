@@ -22,10 +22,8 @@ targets:
       properties:
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "0.1.0"
-        NSBonjourServices:
-          - _repoprompt-remote._tcp
         NSCameraUsageDescription: Scan a RepoPrompt pairing code shown on your Mac.
-        NSLocalNetworkUsageDescription: Discover and connect to RepoPrompt on your local network.
+        NSLocalNetworkUsageDescription: Connect to RepoPrompt on your local network.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         UISupportedInterfaceOrientations~ipad:

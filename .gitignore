@@ -5,12 +5,10 @@ DerivedData/
 *.xcuserstate
 xcuserdata/
 
-# Generated Iroh transport spike outputs. Recreate with the package build script/XcodeGen.
+# Generated Iroh transport artifacts.
 Packages/RepoPromptIrohTransport/Artifacts/
 Packages/RepoPromptIrohTransport/.swiftpm/
 Packages/RepoPromptIrohTransport/rust/target/
-Spikes/IrohTransportSpikeIOS/Info.plist
-Spikes/IrohTransportSpikeIOS/IrohTransportSpike.xcodeproj/
 
 # Local exports and Apple signing material
 /prompt-exports/

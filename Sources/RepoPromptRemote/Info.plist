@@ -18,14 +18,10 @@
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
 	<string>0.1.0</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_repoprompt-remote._tcp</string>
-	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan a RepoPrompt pairing code shown on your Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Discover and connect to RepoPrompt on your local network.</string>
+	<string>Connect to RepoPrompt on your local network.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiresFullScreen</key>
