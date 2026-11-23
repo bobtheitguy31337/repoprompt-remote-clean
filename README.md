@@ -2,7 +2,7 @@
 
 ![Platform](https://img.shields.io/badge/platform-iOS%2017%2B-blue)
 
-RepoPrompt Remote is the iPhone and iPad companion for **[this RepoPrompt CE desktop fork](https://github.com/bobtheitguy31337/repoprompt-ce)**. It lets you follow and control Agent Mode sessions from another room while your Mac continues to run the agents, own the workspaces, and enforce every permission.
+RepoPrompt Remote is the iPhone and iPad companion for **[this RepoPrompt CE desktop fork](https://github.com/bobtheitguy31337/repoprompt-ce)**. It lets you follow and control Agent Mode sessions from another room or on the other side of the earth while your Mac continues to run the agents, own the workspaces, and enforce every permission.
 
 > [!IMPORTANT]
 > RepoPrompt Remote is developed and tested with [`bobtheitguy31337/repoprompt-ce`](https://github.com/bobtheitguy31337/repoprompt-ce). That fork contains the matching macOS Remote Gateway. Other RepoPrompt CE builds or forks are not guaranteed to expose a compatible gateway.
