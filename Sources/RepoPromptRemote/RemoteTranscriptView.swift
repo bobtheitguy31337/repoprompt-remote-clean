@@ -1625,77 +1625,88 @@ private struct RemoteAgentSelectionBar: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Button {
-                showsModelPicker = true
-            } label: {
-                RemoteComposerControlLabel(title: modelLabel)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Model")
-            .accessibilityValue(modelLabel)
-            .disabled(!hasSelectableModel)
-            .sheet(isPresented: $showsModelPicker) {
-                NavigationStack {
-                    List {
-                        ForEach(agents.filter(\.isAvailable), id: \.id) { agent in
-                            Section(agent.displayName) {
-                                ForEach((agent.modelDescriptors ?? []).filter(\.isAvailable), id: \.id) { candidate in
-                                    Button {
-                                        onSelectModel(agent.id, candidate.id)
-                                        showsModelPicker = false
-                                    } label: {
-                                        HStack {
-                                            Text(RemoteLaunchSelection.modelLabel(candidate.displayName))
-                                            Spacer()
-                                            if agent.id == selectedAgentID,
-                                               candidate.id == selectedModelID
-                                            {
-                                                Image(systemName: "checkmark")
-                                            }
-                                        }
-                                    }
-                                    .disabled(!canSelectModel(candidate.id, for: agent.id))
-                                }
-                            }
-                        }
-                    }
-                    .navigationTitle("Model")
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { showsModelPicker = false }
-                        }
-                    }
-                }
-                .presentationDetents([.medium, .large])
-            }
-
-            Menu {
-                ForEach(effortOptions, id: \.id) { effort in
-                    Button {
-                        onSelectReasoningEffort(effort.id)
-                    } label: {
-                        HStack {
-                            Text(effort.displayName)
-                            if effort.id == selectedReasoningEffortID {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                    .disabled(!canSelectEffort(effort.id))
-                }
-            } label: {
-                RemoteComposerControlLabel(title: effortLabel)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Reasoning level")
-            .accessibilityValue(effortLabel)
-            .disabled(!effortOptions.contains { canSelectEffort($0.id) })
-            .layoutPriority(1)
-
+            modelPickerButton
+            reasoningMenu.layoutPriority(1)
             RemoteToolsButton(catalog: toolCatalog, isPending: isPending, canEdit: canEditTools, onToggle: onToggleTool)
                 .layoutPriority(1)
         }
         .accessibilityElement(children: .contain)
+    }
+
+    private var modelPickerButton: some View {
+        Button {
+            showsModelPicker = true
+        } label: {
+            RemoteComposerControlLabel(title: modelLabel)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Model")
+        .accessibilityValue(modelLabel)
+        .disabled(!hasSelectableModel)
+        .sheet(isPresented: $showsModelPicker) {
+            modelPicker
+        }
+    }
+
+    private var modelPicker: some View {
+        NavigationStack {
+            List {
+                ForEach(agents.filter(\.isAvailable), id: \.id) { agent in
+                    Section(agent.displayName) {
+                        ForEach((agent.modelDescriptors ?? []).filter(\.isAvailable), id: \.id) { candidate in
+                            modelPickerRow(candidate, for: agent.id)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Model")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { showsModelPicker = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func modelPickerRow(_ candidate: RemoteModelDescriptor, for agentID: String) -> some View {
+        Button {
+            onSelectModel(agentID, candidate.id)
+            showsModelPicker = false
+        } label: {
+            HStack {
+                Text(RemoteLaunchSelection.modelLabel(candidate.displayName))
+                Spacer()
+                if agentID == selectedAgentID, candidate.id == selectedModelID {
+                    Image(systemName: "checkmark")
+                }
+            }
+        }
+        .disabled(!canSelectModel(candidate.id, for: agentID))
+    }
+
+    private var reasoningMenu: some View {
+        Menu {
+            ForEach(effortOptions, id: \.id) { effort in
+                Button {
+                    onSelectReasoningEffort(effort.id)
+                } label: {
+                    HStack {
+                        Text(effort.displayName)
+                        if effort.id == selectedReasoningEffortID {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+                .disabled(!canSelectEffort(effort.id))
+            }
+        } label: {
+            RemoteComposerControlLabel(title: effortLabel)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Reasoning level")
+        .accessibilityValue(effortLabel)
+        .disabled(!effortOptions.contains { canSelectEffort($0.id) })
     }
 
     private var modelLabel: String {
