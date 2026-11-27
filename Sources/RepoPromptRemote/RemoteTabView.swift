@@ -1,3 +1,4 @@
+import RepoPromptRemoteProtocol
 import SwiftUI
 
 /// The tab entry intentionally contains only the active phone shell. The former
@@ -31,6 +32,14 @@ struct PermissionsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    WorkspaceVoiceSettingLink()
+                } header: {
+                    Text("Workspace Voice")
+                } footer: {
+                    Text("Applies when you start your next voice call.")
+                }
+
                 if model.isPaired {
                     Section {
                         LabeledContent(
@@ -105,4 +114,54 @@ struct PermissionsView: View {
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+private struct WorkspaceVoiceSettingLink: View {
+    @AppStorage(RemoteWorkspaceVoicePreference.storageKey) private var selection = ""
+
+    var body: some View {
+        NavigationLink {
+            WorkspaceVoicePresetList()
+        } label: {
+            LabeledContent(
+                "Voice",
+                value: RemoteWorkspaceVoicePreset(rawValue: selection)?.displayName ?? "Codex default"
+            )
+        }
+    }
+}
+
+private struct WorkspaceVoicePresetList: View {
+    @AppStorage(RemoteWorkspaceVoicePreference.storageKey) private var selection = ""
+
+    var body: some View {
+        List {
+            option("Codex default", id: "")
+            ForEach(RemoteWorkspaceVoicePreset.allCases, id: \.rawValue) { preset in
+                option(preset.displayName, id: preset.rawValue)
+            }
+        }
+        .navigationTitle("Voice")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func option(_ title: String, id: String) -> some View {
+        Button {
+            selection = id
+        } label: {
+            HStack {
+                Text(title)
+                Spacer()
+                if selection == id {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(Color.remoteWarmOrange)
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(minHeight: 34)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selection == id ? .isSelected : [])
+    }
 }

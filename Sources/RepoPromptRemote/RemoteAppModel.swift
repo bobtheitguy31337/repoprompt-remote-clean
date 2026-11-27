@@ -239,6 +239,8 @@ final class RemoteAppModel: ObservableObject {
     private var activeConnectionAttemptID: UUID?
     private var irohGeneration: UInt64 = 0
     private var isSceneActive = true
+    private var voiceConnectionNeeded = false
+    private var shouldMaintainConnection: Bool { isSceneActive || voiceConnectionNeeded }
     private var lastSatisfiedInterface: String?
 
     init() {
@@ -280,7 +282,7 @@ final class RemoteAppModel: ObservableObject {
                 let pathChanged = self.lastSatisfiedInterface != nil && self.lastSatisfiedInterface != interface
                 self.lastSatisfiedInterface = interface
                 self.networkStatus = "Online (\(interface))"
-                if self.isSceneActive, pathChanged, self.connectionState == .connected,
+                if self.shouldMaintainConnection, pathChanged, self.connectionState == .connected,
                    let stored = self.storedCredential
                 {
                     self.activeConnectionAttemptID = nil
@@ -290,7 +292,7 @@ final class RemoteAppModel: ObservableObject {
                     self.connectionState = .disconnected
                     self.lastConnectionEvent = "Network path changed; reconnecting"
                     Task { await self.connect(using: stored) }
-                } else if self.isSceneActive, self.connectionState == .disconnected,
+                } else if self.shouldMaintainConnection, self.connectionState == .disconnected,
                           let stored = self.storedCredential
                 {
                     Task { await self.connect(using: stored) }
@@ -411,6 +413,28 @@ final class RemoteAppModel: ObservableObject {
         connectionState == .connected && snapshot?.authorization.allows(.control) == true
     }
 
+    func workspaceVoiceUnavailableReason(for workspaceID: UUID?) -> String? {
+        guard connectionState == .connected else { return "Connect to the paired Mac to start voice." }
+        guard let workspaceID else { return "Select a workspace to start voice." }
+        guard workspaces.contains(where: { UUID(uuidString: $0.workspaceID) == workspaceID }) else {
+            return "The selected workspace is unavailable on the Mac."
+        }
+        guard canControlChat else { return "Set Remote’s Default authority to Control on the Mac to start voice." }
+        guard agentCatalogMetadata?.supportsWorkspaceVoice == true else {
+            return "Workspace Voice requires a compatible RepoPrompt build on the Mac."
+        }
+        return nil
+    }
+
+    func workspaceVoice(_ request: RemoteWorkspaceVoiceRequest) async throws -> RemoteWorkspaceVoiceStatus {
+        guard let gateway else { throw RemoteWorkspaceVoiceConnectionError.macUnavailable }
+        let response = try await gateway.workspaceVoice(request)
+        guard response.callID == request.callID, response.workspaceID == request.workspaceID else {
+            throw RemoteGatewayError.invalidResponse
+        }
+        return response
+    }
+
     var canSendAttachments: Bool {
         agentCatalogMetadata?.supportsAttachments == true && canControlChat
     }
@@ -448,8 +472,20 @@ final class RemoteAppModel: ObservableObject {
     }
 
     func setSceneActive(_ active: Bool) {
+        let wasMaintaining = shouldMaintainConnection
         isSceneActive = active
-        if active {
+        updateConnectionDemand(wasMaintaining: wasMaintaining)
+    }
+
+    func setVoiceConnectionNeeded(_ needed: Bool) {
+        let wasMaintaining = shouldMaintainConnection
+        voiceConnectionNeeded = needed
+        updateConnectionDemand(wasMaintaining: wasMaintaining)
+    }
+
+    private func updateConnectionDemand(wasMaintaining: Bool) {
+        guard wasMaintaining != shouldMaintainConnection else { return }
+        if shouldMaintainConnection {
             if connectionState == .disconnected, let storedCredential {
                 Task { await connect(using: storedCredential) }
             }
@@ -1349,7 +1385,7 @@ final class RemoteAppModel: ObservableObject {
     }
 
     private func connect(using stored: StoredRemoteCredential) async {
-        guard isSceneActive,
+        guard shouldMaintainConnection,
               connectionState != .connected,
               activeConnectionAttemptID == nil,
               storedCredential == stored
@@ -1371,12 +1407,12 @@ final class RemoteAppModel: ObservableObject {
                 generation: irohGeneration
             )
             candidate = transport
-            guard activeConnectionAttemptID == attemptID, isSceneActive else {
+            guard activeConnectionAttemptID == attemptID, shouldMaintainConnection else {
                 transport.close()
                 return
             }
             try await refreshSnapshot(using: transport, expectedConnectionAttemptID: attemptID)
-            guard activeConnectionAttemptID == attemptID, isSceneActive else {
+            guard activeConnectionAttemptID == attemptID, shouldMaintainConnection else {
                 transport.close()
                 return
             }
@@ -1392,7 +1428,7 @@ final class RemoteAppModel: ObservableObject {
             registerPendingNotificationIfPossible()
         } catch {
             candidate?.close()
-            guard activeConnectionAttemptID == attemptID, isSceneActive, !isExpectedCancellation(error) else { return }
+            guard activeConnectionAttemptID == attemptID, shouldMaintainConnection, !isExpectedCancellation(error) else { return }
             switch error {
             case RemoteGatewayError.credentialRejected, RemoteIrohTransportError.localIdentityChanged:
                 clearLocalPairing()

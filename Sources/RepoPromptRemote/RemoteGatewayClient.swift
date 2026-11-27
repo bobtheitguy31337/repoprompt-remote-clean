@@ -60,6 +60,7 @@ protocol RemoteGatewayTransport: AnyObject {
     func command(_ request: RemoteCommandRequest) async throws -> RemoteCommandResponse
     func history(_ request: RemoteHistoryRPCRequest) async throws -> RemoteHistoryPage
     func imageAttachment(_ request: RemoteImageAttachmentRequest) async throws -> RemoteImageAttachmentChunk
+    func workspaceVoice(_ request: RemoteWorkspaceVoiceRequest) async throws -> RemoteWorkspaceVoiceStatus
     func transcript(
         sessionID: UUID,
         afterSequenceIndex: Int?,
@@ -79,6 +80,10 @@ protocol RemoteGatewayTransport: AnyObject {
 extension RemoteGatewayTransport {
     var irohPath: RemoteIrohPathKind? { nil }
     func close() {}
+
+    func workspaceVoice(_ request: RemoteWorkspaceVoiceRequest) async throws -> RemoteWorkspaceVoiceStatus {
+        throw RemoteGatewayError.invalidResponse
+    }
 
     func transcript(
         sessionID: UUID,

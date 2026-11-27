@@ -218,6 +218,10 @@ final class RemoteIrohGatewayTransport: RemoteGatewayTransport, @unchecked Senda
         try await rpc(.imageAttachment, payload: encoder.encode(request))
     }
 
+    func workspaceVoice(_ request: RemoteWorkspaceVoiceRequest) async throws -> RemoteWorkspaceVoiceStatus {
+        try await rpc(.workspaceVoice, payload: encoder.encode(request))
+    }
+
     func transcript(
         sessionID: UUID,
         afterSequenceIndex: Int?,

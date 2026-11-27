@@ -112,16 +112,116 @@ public enum RemoteInteractionKind: String, Codable, Sendable {
     case secretInput = "secret_input"
 }
 
+public struct RemoteQuestionnaire: Codable, Sendable, Equatable {
+    public let context: String?
+    public let questions: [RemoteQuestionField]
+
+    public init(context: String? = nil, questions: [RemoteQuestionField]) {
+        self.context = context
+        self.questions = questions
+    }
+}
+
+public struct RemoteQuestionField: Codable, Sendable, Equatable, Identifiable {
+    public struct Option: Codable, Sendable, Equatable {
+        public let label: String
+        public let description: String?
+
+        public init(label: String, description: String? = nil) {
+            self.label = label
+            self.description = description
+        }
+    }
+
+    public let id: String
+    public let header: String?
+    public let prompt: String
+    public let context: String?
+    public let options: [Option]
+    public let isSecret: Bool
+    public let allowsMultiple: Bool
+    public let allowsCustom: Bool
+    public let allowsNote: Bool
+    public let allowsSkip: Bool
+
+    public init(
+        id: String, header: String? = nil, prompt: String, context: String? = nil,
+        options: [Option] = [], isSecret: Bool = false, allowsMultiple: Bool = false,
+        allowsCustom: Bool = false, allowsNote: Bool = false, allowsSkip: Bool = false
+    ) {
+        self.id = id
+        self.header = header
+        self.prompt = prompt
+        self.context = context
+        self.options = options
+        self.isSecret = isSecret
+        self.allowsMultiple = allowsMultiple
+        self.allowsCustom = allowsCustom
+        self.allowsNote = allowsNote
+        self.allowsSkip = allowsSkip
+    }
+
+    public func accepts(_ answer: RemoteQuestionAnswer) -> Bool {
+        let indices = answer.selectedOptionIndices
+        let hasText = answer.normalizedText != nil
+        if answer.skipped {
+            return allowsSkip && indices.isEmpty && !hasText
+        }
+        return Set(indices).count == indices.count
+            && indices.allSatisfy(options.indices.contains)
+            && (allowsMultiple || indices.count <= 1)
+            && (!hasText || allowsCustom)
+            && (indices.isEmpty || !hasText || allowsMultiple || allowsNote)
+            && (!indices.isEmpty || hasText)
+    }
+}
+
+/// Transient response data, including masked entries when the pending field is secret.
+/// These values belong only to the respond command and must never be recorded.
+public struct RemoteQuestionAnswer: Codable, Sendable, Equatable {
+    public let selectedOptionIndices: [Int]
+    public let text: String?
+    public let skipped: Bool
+
+    public init(selectedOptionIndices: [Int] = [], text: String? = nil, skipped: Bool = false) {
+        self.selectedOptionIndices = selectedOptionIndices
+        self.text = text
+        self.skipped = skipped
+    }
+
+    public var normalizedText: String? {
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        return text
+    }
+}
+
 /// A pending interaction deliberately contains no answer value. Secret answers are
 /// submitted as one-shot commands and are never part of snapshots, history, or events.
 public struct RemoteInteractionSummary: Codable, Sendable, Equatable {
+    private static let legacyMultipartReason = "Answer this multi-part request on your Mac."
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, title, prompt, requiresSecureEntry, createdAt, questionnaire
+        case wireResponseUnavailableReason = "responseUnavailableReason"
+    }
+
     public let id: String
     public let kind: RemoteInteractionKind
     public let title: String?
     public let prompt: String?
     public let requiresSecureEntry: Bool
-    public let responseUnavailableReason: String?
+    private let wireResponseUnavailableReason: String?
     public let createdAt: Date
+    public let questionnaire: RemoteQuestionnaire?
+
+    public var responseUnavailableReason: String? {
+        // Questionnaire-aware clients can respond to multipart prompts. Older clients
+        // read the wire reason and keep their single-answer form disabled.
+        if (questionnaire?.questions.count ?? 0) > 1, wireResponseUnavailableReason == Self.legacyMultipartReason {
+            return nil
+        }
+        return wireResponseUnavailableReason
+    }
 
     public init(
         id: String,
@@ -130,15 +230,18 @@ public struct RemoteInteractionSummary: Codable, Sendable, Equatable {
         prompt: String? = nil,
         requiresSecureEntry: Bool = false,
         responseUnavailableReason: String? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        questionnaire: RemoteQuestionnaire? = nil
     ) {
         self.id = id
         self.kind = kind
         self.title = title
         self.prompt = prompt
         self.requiresSecureEntry = requiresSecureEntry
-        self.responseUnavailableReason = responseUnavailableReason
+        self.wireResponseUnavailableReason = responseUnavailableReason
+            ?? ((questionnaire?.questions.count ?? 0) > 1 ? Self.legacyMultipartReason : nil)
         self.createdAt = createdAt
+        self.questionnaire = questionnaire
     }
 }
 
@@ -352,6 +455,7 @@ public struct RemoteCatalogMetadata: Codable, Sendable, Equatable {
     public let supportsStartSelection: Bool
     public let supportsSessionConfiguration: Bool
     public let supportsAttachments: Bool?
+    public let supportsWorkspaceVoice: Bool?
 
     public init(
         defaultAgentID: String? = nil,
@@ -359,7 +463,8 @@ public struct RemoteCatalogMetadata: Codable, Sendable, Equatable {
         toolCatalog: RemoteToolCatalog? = nil,
         supportsStartSelection: Bool = false,
         supportsSessionConfiguration: Bool = false,
-        supportsAttachments: Bool? = nil
+        supportsAttachments: Bool? = nil,
+        supportsWorkspaceVoice: Bool? = nil
     ) {
         self.defaultAgentID = defaultAgentID
         self.defaultSelection = defaultSelection
@@ -367,6 +472,7 @@ public struct RemoteCatalogMetadata: Codable, Sendable, Equatable {
         self.supportsStartSelection = supportsStartSelection
         self.supportsSessionConfiguration = supportsSessionConfiguration
         self.supportsAttachments = supportsAttachments
+        self.supportsWorkspaceVoice = supportsWorkspaceVoice
     }
 }
 
@@ -787,6 +893,7 @@ public struct RemoteTranscriptItem: Codable, Sendable, Equatable, Identifiable {
     public let detailText: String?
     public let detail: RemoteTranscriptDetail?
     public let attachments: [RemoteTranscriptAttachment]?
+    public let diffSummary: RemoteTranscriptDiffSummary?
 
     public init(
         id: UUID,
@@ -803,7 +910,8 @@ public struct RemoteTranscriptItem: Codable, Sendable, Equatable, Identifiable {
         detailAvailable: Bool = false,
         detailText: String? = nil,
         detail: RemoteTranscriptDetail? = nil,
-        attachments: [RemoteTranscriptAttachment]? = nil
+        attachments: [RemoteTranscriptAttachment]? = nil,
+        diffSummary: RemoteTranscriptDiffSummary? = nil
     ) {
         self.id = id
         self.turnID = turnID
@@ -820,6 +928,7 @@ public struct RemoteTranscriptItem: Codable, Sendable, Equatable, Identifiable {
         self.detailText = detailText
         self.detail = detail
         self.attachments = attachments
+        self.diffSummary = diffSummary
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -838,27 +947,107 @@ public struct RemoteTranscriptItem: Codable, Sendable, Equatable, Identifiable {
         case detailText
         case detail
         case attachments
+        case diffSummary
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.init(
-            id: try container.decode(UUID.self, forKey: .id),
-            turnID: try container.decode(UUID.self, forKey: .turnID),
-            timestamp: try container.decode(Date.self, forKey: .timestamp),
-            sequenceIndex: try container.decode(Int.self, forKey: .sequenceIndex),
-            kind: try container.decode(RemoteTranscriptItemKind.self, forKey: .kind),
-            semanticKind: try container.decodeIfPresent(RemoteTranscriptSemanticKind.self, forKey: .semanticKind),
-            role: try container.decode(String.self, forKey: .role),
-            text: try container.decodeIfPresent(String.self, forKey: .text),
-            toolName: try container.decodeIfPresent(String.self, forKey: .toolName),
-            toolStatus: try container.decodeIfPresent(String.self, forKey: .toolStatus),
-            summaryOnly: try container.decode(Bool.self, forKey: .summaryOnly),
-            detailAvailable: try container.decode(Bool.self, forKey: .detailAvailable),
-            detailText: try container.decodeIfPresent(String.self, forKey: .detailText),
-            detail: try container.decodeIfPresent(RemoteTranscriptDetail.self, forKey: .detail),
-            attachments: try container.decodeIfPresent([RemoteTranscriptAttachment].self, forKey: .attachments)
+        try self.init(
+            id: container.decode(UUID.self, forKey: .id),
+            turnID: container.decode(UUID.self, forKey: .turnID),
+            timestamp: container.decode(Date.self, forKey: .timestamp),
+            sequenceIndex: container.decode(Int.self, forKey: .sequenceIndex),
+            kind: container.decode(RemoteTranscriptItemKind.self, forKey: .kind),
+            semanticKind: container.decodeIfPresent(RemoteTranscriptSemanticKind.self, forKey: .semanticKind),
+            role: container.decode(String.self, forKey: .role),
+            text: container.decodeIfPresent(String.self, forKey: .text),
+            toolName: container.decodeIfPresent(String.self, forKey: .toolName),
+            toolStatus: container.decodeIfPresent(String.self, forKey: .toolStatus),
+            summaryOnly: container.decode(Bool.self, forKey: .summaryOnly),
+            detailAvailable: container.decode(Bool.self, forKey: .detailAvailable),
+            detailText: container.decodeIfPresent(String.self, forKey: .detailText),
+            detail: container.decodeIfPresent(RemoteTranscriptDetail.self, forKey: .detail),
+            attachments: container.decodeIfPresent([RemoteTranscriptAttachment].self, forKey: .attachments),
+            diffSummary: container.decodeIfPresent(RemoteTranscriptDiffSummary.self, forKey: .diffSummary)
         )
+    }
+}
+
+public struct RemoteRecordedQuestionExchange: Codable, Sendable, Equatable {
+    public enum Outcome: String, Codable, Sendable {
+        case answered
+        case skipped
+        case timedOut = "timed_out"
+    }
+
+    public struct Question: Codable, Sendable, Equatable {
+        public let header: String?
+        public let prompt: String
+        public let answer: String?
+        public let skipped: Bool
+
+        public init(header: String? = nil, prompt: String, answer: String? = nil, skipped: Bool = false) {
+            self.header = header
+            self.prompt = prompt
+            self.answer = answer
+            self.skipped = skipped
+        }
+    }
+
+    public let title: String?
+    public let questions: [Question]
+    public let outcome: Outcome
+
+    public init(title: String? = nil, questions: [Question], outcome: Outcome) {
+        self.title = title
+        self.questions = questions
+        self.outcome = outcome
+    }
+}
+
+public struct RemoteTranscriptDiffSummary: Codable, Sendable, Equatable {
+    public let fileCount: Int
+    public let singleFilePath: String?
+    public let additions: Int?
+    public let deletions: Int?
+    public let isTruncated: Bool
+
+    public init(
+        fileCount: Int,
+        singleFilePath: String? = nil,
+        additions: Int? = nil,
+        deletions: Int? = nil,
+        isTruncated: Bool = false
+    ) {
+        self.fileCount = fileCount
+        self.singleFilePath = singleFilePath
+        self.additions = additions
+        self.deletions = deletions
+        self.isTruncated = isTruncated
+    }
+}
+
+public struct RemoteTranscriptDiffPreview: Codable, Sendable, Equatable {
+    public struct File: Codable, Sendable, Equatable {
+        public let path: String
+        public let additions: Int?
+        public let deletions: Int?
+        public let patch: String?
+
+        public init(path: String, additions: Int? = nil, deletions: Int? = nil, patch: String? = nil) {
+            self.path = path
+            self.additions = additions
+            self.deletions = deletions
+            self.patch = patch
+        }
+    }
+
+    public let files: [File]
+    public let isTruncated: Bool
+
+    public init(files: [File], isTruncated: Bool = false) {
+        self.files = files
+        self.isTruncated = isTruncated
     }
 }
 
@@ -871,6 +1060,8 @@ public struct RemoteTranscriptDetail: Codable, Sendable, Equatable {
     public let exitCode: Int?
     public let summaryText: String?
     public let toolIsError: Bool?
+    public let questionExchange: RemoteRecordedQuestionExchange?
+    public let diffPreview: RemoteTranscriptDiffPreview?
 
     public init(
         argumentsJSON: String? = nil,
@@ -880,7 +1071,9 @@ public struct RemoteTranscriptDetail: Codable, Sendable, Equatable {
         processID: String? = nil,
         exitCode: Int? = nil,
         summaryText: String? = nil,
-        toolIsError: Bool? = nil
+        toolIsError: Bool? = nil,
+        questionExchange: RemoteRecordedQuestionExchange? = nil,
+        diffPreview: RemoteTranscriptDiffPreview? = nil
     ) {
         self.argumentsJSON = argumentsJSON
         self.resultJSON = resultJSON
@@ -890,6 +1083,8 @@ public struct RemoteTranscriptDetail: Codable, Sendable, Equatable {
         self.exitCode = exitCode
         self.summaryText = summaryText
         self.toolIsError = toolIsError
+        self.questionExchange = questionExchange
+        self.diffPreview = diffPreview
     }
 }
 
@@ -1261,10 +1456,12 @@ public struct RemoteCommandRequest: Codable, Sendable, Equatable {
     public let decision: String?
     public let answers: [String: [String]]
     public let secret: String?
+    public let questionAnswers: [String: RemoteQuestionAnswer]?
     public let agentID: String?
     public let modelID: String?
     public let reasoningEffort: String?
     public let workflowID: String?
+    public let interviewFirst: Bool?
     public let contextBuilderResponseType: String?
     public let contextBuilderExportResponse: Bool?
     public let notificationRegistration: RemoteNotificationRegistration?
@@ -1283,10 +1480,12 @@ public struct RemoteCommandRequest: Codable, Sendable, Equatable {
         decision: String? = nil,
         answers: [String: [String]] = [:],
         secret: String? = nil,
+        questionAnswers: [String: RemoteQuestionAnswer]? = nil,
         agentID: String? = nil,
         modelID: String? = nil,
         reasoningEffort: String? = nil,
         workflowID: String? = nil,
+        interviewFirst: Bool? = nil,
         contextBuilderResponseType: String? = nil,
         contextBuilderExportResponse: Bool? = nil,
         notificationRegistration: RemoteNotificationRegistration? = nil,
@@ -1304,10 +1503,12 @@ public struct RemoteCommandRequest: Codable, Sendable, Equatable {
         self.decision = decision
         self.answers = answers
         self.secret = secret
+        self.questionAnswers = questionAnswers
         self.agentID = agentID
         self.modelID = modelID
         self.reasoningEffort = reasoningEffort
         self.workflowID = workflowID
+        self.interviewFirst = interviewFirst
         self.contextBuilderResponseType = contextBuilderResponseType
         self.contextBuilderExportResponse = contextBuilderExportResponse
         self.notificationRegistration = notificationRegistration

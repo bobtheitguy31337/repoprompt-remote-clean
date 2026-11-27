@@ -4,14 +4,22 @@ public enum RemoteWireProtocol {
     public static let currentVersion = 1
     public static let maximumClientFrameBytes = 1_048_576
     public static let maximumServerResponseFrameBytes = 8_388_608
+    /// Reserve capacity for the snapshot RPC envelope and both base64 layers.
+    public static let maximumSnapshotJSONBytes = maximumServerResponseFrameBytes / 8
     public static let maximumEventFrameBytes = 1_048_576
     public static let maximumConcurrentRPCStreams = 8
     public static let maximumEventStreams = 1
+    public static let pairingAttemptLifetime: TimeInterval = 5 * 60
 }
 
 public enum RemoteWireFrameKind: String, Codable, Sendable, CaseIterable {
     case authenticatedHello = "authenticated_hello"
     case pairingHello = "pairing_hello"
+    case pairingPrepare = "pairing_prepare"
+    case pairingConfirm = "pairing_confirm"
+    case pairingConfirmed = "pairing_confirmed"
+    case syncConfirm = "sync_confirm"
+    case syncConfirmed = "sync_confirmed"
     case helloAccepted = "hello_accepted"
     case rpcRequest = "rpc_request"
     case rpcResponse = "rpc_response"
@@ -25,32 +33,37 @@ public struct RemoteWireFrame: Codable, Sendable, Equatable {
     public let wireVersion: Int
     public let kind: RemoteWireFrameKind
     public let messageID: UUID?
+    public let sessionID: UUID?
     public let payload: Data
 
     public init(
         wireVersion: Int = RemoteWireProtocol.currentVersion,
         kind: RemoteWireFrameKind,
         messageID: UUID? = nil,
+        sessionID: UUID? = nil,
         payload: Data = Data()
     ) {
         self.wireVersion = wireVersion
         self.kind = kind
         self.messageID = messageID
+        self.sessionID = sessionID
         self.payload = payload
     }
 
-    public init<Payload: Encodable>(
+    public init(
         wireVersion: Int = RemoteWireProtocol.currentVersion,
         kind: RemoteWireFrameKind,
         messageID: UUID? = nil,
-        encoding payload: Payload,
+        sessionID: UUID? = nil,
+        encoding payload: some Encodable,
         encoder: JSONEncoder = JSONEncoder()
     ) throws {
-        self.init(
+        try self.init(
             wireVersion: wireVersion,
             kind: kind,
             messageID: messageID,
-            payload: try encoder.encode(payload)
+            sessionID: sessionID,
+            payload: encoder.encode(payload)
         )
     }
 
@@ -121,6 +134,7 @@ public enum RemoteRPCOperation: String, Codable, Sendable, CaseIterable {
     case history
     case transcript
     case imageAttachment = "image_attachment"
+    case workspaceVoice = "workspace_voice"
     case command
     case contextBuilder = "context_builder"
 }
@@ -128,37 +142,63 @@ public enum RemoteRPCOperation: String, Codable, Sendable, CaseIterable {
 public struct RemoteRPCRequest: Codable, Sendable, Equatable {
     public let operation: RemoteRPCOperation
     public let payload: Data
+    public let acceptsCompressedSnapshot: Bool?
 
-    public init(operation: RemoteRPCOperation, payload: Data = Data()) {
+    public init(
+        operation: RemoteRPCOperation,
+        payload: Data = Data(),
+        acceptsCompressedSnapshot: Bool? = nil
+    ) {
         self.operation = operation
         self.payload = payload
+        self.acceptsCompressedSnapshot = acceptsCompressedSnapshot
     }
 }
 
 public struct RemoteRPCResponse: Codable, Sendable, Equatable {
     public let result: Data?
     public let error: RemoteErrorResponse?
+    public let syncTicket: UUID?
+    public let uncompressedSnapshotBytes: Int?
 
-    public init(result: Data) {
-        self.result = result
+    public init(result: Data, syncTicket: UUID? = nil, compressSnapshot: Bool = false) {
+        self.syncTicket = syncTicket
         error = nil
+        if compressSnapshot, let compressed = RemoteSnapshotCompression.encode(result) {
+            self.result = compressed
+            uncompressedSnapshotBytes = result.count
+        } else {
+            self.result = result
+            uncompressedSnapshotBytes = nil
+        }
     }
 
     public init(error: RemoteErrorResponse) {
+        syncTicket = nil
         result = nil
+        uncompressedSnapshotBytes = nil
         self.error = error
+    }
+
+    public func decodedResult() throws -> Data? {
+        guard let result, let uncompressedSnapshotBytes else { return result }
+        return try RemoteSnapshotCompression.decode(result, expectedBytes: uncompressedSnapshotBytes)
     }
 
     private enum CodingKeys: String, CodingKey {
         case result
         case error
+        case syncTicket
+        case uncompressedSnapshotBytes
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         result = try container.decodeIfPresent(Data.self, forKey: .result)
         error = try container.decodeIfPresent(RemoteErrorResponse.self, forKey: .error)
-        guard (result != nil) != (error != nil) else {
+        syncTicket = try container.decodeIfPresent(UUID.self, forKey: .syncTicket)
+        uncompressedSnapshotBytes = try container.decodeIfPresent(Int.self, forKey: .uncompressedSnapshotBytes)
+        guard (result != nil) != (error != nil), uncompressedSnapshotBytes == nil || result != nil else {
             throw DecodingError.dataCorruptedError(
                 forKey: .result,
                 in: container,
@@ -174,19 +214,22 @@ public struct RemoteAuthenticatedHello: Codable, Sendable, Equatable {
     public let expectedServerEndpointID: String
     public let deviceID: String
     public let credential: String
+    public let supportsSyncConfirmation: Bool?
 
     public init(
         protocolVersion: Int = RemoteProtocol.currentVersion,
         desktopInstanceID: String,
         expectedServerEndpointID: String,
         deviceID: String,
-        credential: String
+        credential: String,
+        supportsSyncConfirmation: Bool? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.desktopInstanceID = desktopInstanceID
         self.expectedServerEndpointID = expectedServerEndpointID
         self.deviceID = deviceID
         self.credential = credential
+        self.supportsSyncConfirmation = supportsSyncConfirmation
     }
 }
 
@@ -205,6 +248,8 @@ public struct RemoteHelloAccepted: Codable, Sendable, Equatable {
     public let serverEndpointID: String
     public let clientEndpointID: String
     public let deviceID: String
+    public let sessionID: UUID?
+    public let serverAddress: RemoteIrohEndpointAddress?
 
     public init(
         protocolVersion: Int = RemoteProtocol.currentVersion,
@@ -212,7 +257,9 @@ public struct RemoteHelloAccepted: Codable, Sendable, Equatable {
         desktopInstanceID: String,
         serverEndpointID: String,
         clientEndpointID: String,
-        deviceID: String
+        deviceID: String,
+        sessionID: UUID? = nil,
+        serverAddress: RemoteIrohEndpointAddress? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.wireVersion = wireVersion
@@ -220,6 +267,18 @@ public struct RemoteHelloAccepted: Codable, Sendable, Equatable {
         self.serverEndpointID = serverEndpointID
         self.clientEndpointID = clientEndpointID
         self.deviceID = deviceID
+        self.sessionID = sessionID
+        self.serverAddress = serverAddress
+    }
+}
+
+public struct RemotePairingConfirmation: Codable, Sendable, Equatable {
+    public let attemptID: UUID
+    public let authentication: RemoteAuthenticatedHello
+
+    public init(attemptID: UUID, authentication: RemoteAuthenticatedHello) {
+        self.attemptID = attemptID
+        self.authentication = authentication
     }
 }
 
