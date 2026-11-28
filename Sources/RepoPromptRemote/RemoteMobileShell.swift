@@ -536,7 +536,6 @@ private struct RemoteNavigationDrawer: View {
         } else {
             workspace.isOpen ? "Open on Mac" : "Closed on Mac"
         }
-        let action = workspace.isOpen ? "Close" : "Open"
 
         return HStack(spacing: 8) {
             Button {
@@ -565,31 +564,27 @@ private struct RemoteNavigationDrawer: View {
             .accessibilityValue(status)
             .accessibilityAddTraits(isSelected ? .isSelected : [])
             if isAvailable, workspace.supportsPresentationControl == true, let workspaceID {
-                Button {
-                    workspacePickerError = nil
-                    Task {
-                        do {
-                            try await model.setWorkspacePresentation(.init(workspaceID: workspaceID, isOpen: !workspace.isOpen))
-                        } catch is CancellationError {
-                        } catch {
-                            workspacePickerError = error.localizedDescription
+                Toggle("Open \(workspace.name) on Mac", isOn: Binding(
+                    get: { pending?.isOpen ?? workspace.isOpen },
+                    set: { isOpen in
+                        guard isOpen != workspace.isOpen else { return }
+                        workspacePickerError = nil
+                        let request = RemoteWorkspacePresentation(workspaceID: workspaceID, isOpen: isOpen)
+                        Task {
+                            do {
+                                try await model.setWorkspacePresentation(request)
+                            } catch is CancellationError {
+                            } catch {
+                                workspacePickerError = error.localizedDescription
+                            }
                         }
                     }
-                } label: {
-                    Group {
-                        if pending != nil {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Text(action).font(.caption.weight(.semibold))
-                        }
-                    }
-                    .frame(minWidth: 54, minHeight: 44)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.remoteWarmOrange)
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .tint(.green)
+                .fixedSize()
                 .disabled(!model.canControlChat || model.pendingWorkspacePresentation != nil)
-                .accessibilityLabel("\(action) \(workspace.name) on the Mac")
             }
         }
         .padding(.horizontal, 14)
