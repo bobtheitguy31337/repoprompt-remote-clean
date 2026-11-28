@@ -362,10 +362,13 @@ private struct MobileProjectEmptyView: View {
 }
 
 private struct RemoteNavigationDrawer: View {
+    private struct WorkspaceChoices: Identifiable {
+        let id = UUID()
+        let workspaces: [RemoteWorkspaceSummary]
+    }
+
     @EnvironmentObject private var model: RemoteAppModel
-    @State private var showingWorkspaceChoices = false
-    @State private var workspaceChoices: [RemoteWorkspaceSummary] = []
-    @State private var workspacePickerError: String?
+    @State private var workspaceChoices: WorkspaceChoices?
     let selectedWorkspace: RemoteWorkspaceSummary?
     let historyPhase: RemoteWorkspaceHistory.Phase?
     let rows: [RemoteSessionNavigationRow]
@@ -473,9 +476,9 @@ private struct RemoteNavigationDrawer: View {
 
     private var workspaceMenu: some View {
         Button {
-            workspaceChoices = model.workspaces
-            workspacePickerError = nil
-            showingWorkspaceChoices = true
+            let workspaces = model.workspaces
+            guard !workspaces.isEmpty else { return }
+            workspaceChoices = WorkspaceChoices(workspaces: workspaces)
         } label: {
             HStack(spacing: 10) {
                 WorkspaceMark(isOpen: selectedWorkspace?.isOpen == true)
@@ -494,100 +497,13 @@ private struct RemoteNavigationDrawer: View {
         .buttonStyle(.plain)
         .disabled(model.workspaces.isEmpty)
         .accessibilityHint("Shows available workspaces")
-        .popover(isPresented: $showingWorkspaceChoices, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
-            workspacePicker
-        }
-    }
-
-    private var workspacePicker: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(workspaceChoices, id: \.workspaceID) { saved in
-                        let current = model.workspaces.first { $0.workspaceID == saved.workspaceID }
-                        workspacePickerRow(current ?? saved, isAvailable: current != nil)
-                    }
-                }
-                .padding(.vertical, 6)
+        .popover(item: $workspaceChoices, attachmentAnchor: .rect(.bounds), arrowEdge: .top) { choices in
+            RemoteWorkspacePicker(workspaces: choices.workspaces, selectedWorkspaceID: selectedWorkspace?.workspaceID) { workspaceID in
+                workspaceChoices = nil
+                onSelectWorkspace(workspaceID)
             }
-            .frame(height: CGFloat(min(workspaceChoices.count, 6)) * 52 + 12)
-            if let workspacePickerError {
-                Divider()
-                Text(workspacePickerError)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-            }
+            .presentationCompactAdaptation(.popover)
         }
-        .frame(width: 280)
-        .presentationCompactAdaptation(.popover)
-    }
-
-    private func workspacePickerRow(_ workspace: RemoteWorkspaceSummary, isAvailable: Bool) -> some View {
-        let isSelected = workspace.workspaceID == selectedWorkspace?.workspaceID
-        let workspaceID = UUID(uuidString: workspace.workspaceID)
-        let pending = model.pendingWorkspacePresentation.flatMap { $0.workspaceID == workspaceID ? $0 : nil }
-        let status = if let pending {
-            pending.isOpen ? "Opening on Mac…" : "Closing on Mac…"
-        } else if !isAvailable {
-            "Unavailable"
-        } else {
-            workspace.isOpen ? "Open on Mac" : "Closed on Mac"
-        }
-
-        return HStack(spacing: 8) {
-            Button {
-                showingWorkspaceChoices = false
-                onSelectWorkspace(workspace.workspaceID)
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: workspace.isOpen ? "folder.fill" : "folder")
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(workspace.name).font(.subheadline.weight(.medium)).lineLimit(1)
-                        Text(status).font(.caption).foregroundStyle(.secondary)
-                    }
-                    if isSelected {
-                        Image(systemName: "checkmark")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Color.remoteWarmOrange)
-                    }
-                }
-                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!isAvailable)
-            .accessibilityLabel(workspace.name)
-            .accessibilityValue(status)
-            .accessibilityAddTraits(isSelected ? .isSelected : [])
-            if isAvailable, workspace.supportsPresentationControl == true, let workspaceID {
-                Toggle("Open \(workspace.name) on Mac", isOn: Binding(
-                    get: { pending?.isOpen ?? workspace.isOpen },
-                    set: { isOpen in
-                        guard isOpen != workspace.isOpen else { return }
-                        workspacePickerError = nil
-                        let request = RemoteWorkspacePresentation(workspaceID: workspaceID, isOpen: isOpen)
-                        Task {
-                            do {
-                                try await model.setWorkspacePresentation(request)
-                            } catch is CancellationError {
-                            } catch {
-                                workspacePickerError = error.localizedDescription
-                            }
-                        }
-                    }
-                ))
-                .toggleStyle(.switch)
-                .labelsHidden()
-                .tint(.green)
-                .fixedSize()
-                .disabled(!model.canControlChat || model.pendingWorkspacePresentation != nil)
-            }
-        }
-        .padding(.horizontal, 14)
     }
 
     private var connectionFooter: some View {
@@ -623,6 +539,107 @@ private struct RemoteNavigationDrawer: View {
             .buttonStyle(.plain)
         }
         .font(.subheadline.weight(.medium))
+    }
+}
+
+private struct RemoteWorkspacePicker: View {
+    @EnvironmentObject private var model: RemoteAppModel
+    @State private var errorMessage: String?
+    let workspaces: [RemoteWorkspaceSummary]
+    let selectedWorkspaceID: String?
+    let onSelectWorkspace: (String) -> Void
+
+    var body: some View {
+        let workspacesByID = Dictionary(
+            model.workspaces.map { ($0.workspaceID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return VStack(spacing: 0) {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(workspaces, id: \.workspaceID) { saved in
+                        let current = workspacesByID[saved.workspaceID]
+                        workspacePickerRow(current ?? saved, isAvailable: current != nil)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+            .frame(height: CGFloat(min(workspaces.count, 6)) * 52 + 12)
+            if let errorMessage {
+                Divider()
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+        }
+        .frame(width: 280)
+    }
+
+    private func workspacePickerRow(_ workspace: RemoteWorkspaceSummary, isAvailable: Bool) -> some View {
+        let isSelected = workspace.workspaceID == selectedWorkspaceID
+        let workspaceID = UUID(uuidString: workspace.workspaceID)
+        let pending = model.pendingWorkspacePresentation.flatMap { $0.workspaceID == workspaceID ? $0 : nil }
+        let status = if let pending {
+            pending.isOpen ? "Opening on Mac…" : "Closing on Mac…"
+        } else if !isAvailable {
+            "Unavailable"
+        } else {
+            workspace.isOpen ? "Open on Mac" : "Closed on Mac"
+        }
+
+        return HStack(spacing: 8) {
+            Button {
+                onSelectWorkspace(workspace.workspaceID)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: workspace.isOpen ? "folder.fill" : "folder")
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(workspace.name).font(.subheadline.weight(.medium)).lineLimit(1)
+                        Text(status).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if isSelected {
+                        Image(systemName: "checkmark")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.remoteWarmOrange)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!isAvailable)
+            .accessibilityLabel(workspace.name)
+            .accessibilityValue(status)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            if isAvailable, workspace.supportsPresentationControl == true, let workspaceID {
+                Toggle("Open \(workspace.name) on Mac", isOn: Binding(
+                    get: { pending?.isOpen ?? workspace.isOpen },
+                    set: { isOpen in
+                        guard isOpen != workspace.isOpen else { return }
+                        errorMessage = nil
+                        let request = RemoteWorkspacePresentation(workspaceID: workspaceID, isOpen: isOpen)
+                        Task {
+                            do {
+                                try await model.setWorkspacePresentation(request)
+                            } catch is CancellationError {
+                            } catch {
+                                errorMessage = error.localizedDescription
+                            }
+                        }
+                    }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .tint(.green)
+                .fixedSize()
+                .disabled(!model.canControlChat || model.pendingWorkspacePresentation != nil)
+            }
+        }
+        .padding(.horizontal, 14)
     }
 }
 
