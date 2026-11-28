@@ -222,6 +222,10 @@ final class RemoteIrohGatewayTransport: RemoteGatewayTransport, @unchecked Senda
         try await rpc(.workspaceVoice, payload: encoder.encode(request))
     }
 
+    func setWorkspacePresentation(_ request: RemoteWorkspacePresentation) async throws -> RemoteWorkspacePresentation {
+        try await rpc(.workspacePresentation, payload: encoder.encode(request))
+    }
+
     func transcript(
         sessionID: UUID,
         afterSequenceIndex: Int?,

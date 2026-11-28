@@ -178,6 +178,7 @@ final class RemoteAppModel: ObservableObject {
     @Published private(set) var lastAcceptedCommandID: UUID?
     @Published private(set) var lastAcceptedCommand: RemoteAcceptedCommand?
     @Published private(set) var snapshot: RemoteSnapshot?
+    @Published private(set) var pendingWorkspacePresentation: RemoteWorkspacePresentation?
     @Published private(set) var workspaceHistory: [String: RemoteWorkspaceHistory] = [:]
     enum TranscriptDetailState: Equatable {
         case loading
@@ -433,6 +434,21 @@ final class RemoteAppModel: ObservableObject {
             throw RemoteGatewayError.invalidResponse
         }
         return response
+    }
+
+    func setWorkspacePresentation(_ request: RemoteWorkspacePresentation) async throws {
+        guard pendingWorkspacePresentation == nil else { return }
+        guard canControlChat, let gateway else {
+            throw RemoteGatewayError.requestRejected(.init(
+                code: "forbidden", message: "Connect to the Mac with Control permission to manage workspaces."
+            ))
+        }
+        pendingWorkspacePresentation = request
+        defer { pendingWorkspacePresentation = nil }
+        let response = try await gateway.setWorkspacePresentation(request)
+        guard response == request else { throw RemoteGatewayError.invalidResponse }
+        guard self.gateway === gateway else { throw CancellationError() }
+        try await refreshSnapshot()
     }
 
     var canSendAttachments: Bool {
@@ -1445,11 +1461,19 @@ final class RemoteAppModel: ObservableObject {
         using client: (any RemoteGatewayTransport)? = nil,
         expectedConnectionAttemptID: UUID? = nil
     ) async throws {
-        guard let client = client ?? gateway else { throw RemotePairingError.unavailableDesktop }
-        let newSnapshot = try await client.snapshot()
+        guard let transport = client ?? gateway else { throw RemotePairingError.unavailableDesktop }
+        let newSnapshot = try await transport.snapshot()
         if let expectedConnectionAttemptID {
             guard activeConnectionAttemptID == expectedConnectionAttemptID else {
                 throw CancellationError()
+            }
+        }
+        if client == nil {
+            guard gateway === transport else { throw CancellationError() }
+            if let snapshot, snapshot.transcriptRevisionEpoch == newSnapshot.transcriptRevisionEpoch,
+               snapshot.eventCursor > newSnapshot.eventCursor
+            {
+                return
             }
         }
         let previousSnapshot = snapshot

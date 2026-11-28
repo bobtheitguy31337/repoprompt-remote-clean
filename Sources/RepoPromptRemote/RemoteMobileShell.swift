@@ -365,6 +365,7 @@ private struct RemoteNavigationDrawer: View {
     @EnvironmentObject private var model: RemoteAppModel
     @State private var showingWorkspaceChoices = false
     @State private var workspaceChoices: [RemoteWorkspaceSummary] = []
+    @State private var workspacePickerError: String?
     let selectedWorkspace: RemoteWorkspaceSummary?
     let historyPhase: RemoteWorkspaceHistory.Phase?
     let rows: [RemoteSessionNavigationRow]
@@ -473,6 +474,7 @@ private struct RemoteNavigationDrawer: View {
     private var workspaceMenu: some View {
         Button {
             workspaceChoices = model.workspaces
+            workspacePickerError = nil
             showingWorkspaceChoices = true
         } label: {
             HStack(spacing: 10) {
@@ -493,36 +495,104 @@ private struct RemoteNavigationDrawer: View {
         .disabled(model.workspaces.isEmpty)
         .accessibilityHint("Shows available workspaces")
         .popover(isPresented: $showingWorkspaceChoices, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
+            workspacePicker
+        }
+    }
+
+    private var workspacePicker: some View {
+        VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(workspaceChoices, id: \.workspaceID) { workspace in
-                        let isSelected = workspace.workspaceID == selectedWorkspace?.workspaceID
-                        Button {
-                            showingWorkspaceChoices = false
-                            onSelectWorkspace(workspace.workspaceID)
-                        } label: {
-                            HStack(spacing: 12) {
-                                Label(workspace.name, systemImage: workspace.isOpen ? "folder.fill" : "folder")
-                                Spacer(minLength: 6)
-                                if isSelected {
-                                    Image(systemName: "checkmark")
-                                        .foregroundStyle(Color.remoteWarmOrange)
-                                        .accessibilityHidden(true)
-                                }
-                            }
-                            .padding(.horizontal, 14)
-                            .frame(minHeight: 44)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    ForEach(workspaceChoices, id: \.workspaceID) { saved in
+                        let current = model.workspaces.first { $0.workspaceID == saved.workspaceID }
+                        workspacePickerRow(current ?? saved, isAvailable: current != nil)
                     }
                 }
                 .padding(.vertical, 6)
             }
-            .frame(width: 252, height: CGFloat(min(workspaceChoices.count, 7)) * 44 + 12)
-            .presentationCompactAdaptation(.popover)
+            .frame(height: CGFloat(min(workspaceChoices.count, 6)) * 52 + 12)
+            if let workspacePickerError {
+                Divider()
+                Text(workspacePickerError)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
         }
+        .frame(width: 280)
+        .presentationCompactAdaptation(.popover)
+    }
+
+    private func workspacePickerRow(_ workspace: RemoteWorkspaceSummary, isAvailable: Bool) -> some View {
+        let isSelected = workspace.workspaceID == selectedWorkspace?.workspaceID
+        let workspaceID = UUID(uuidString: workspace.workspaceID)
+        let pending = model.pendingWorkspacePresentation.flatMap { $0.workspaceID == workspaceID ? $0 : nil }
+        let status = if let pending {
+            pending.isOpen ? "Opening on Mac…" : "Closing on Mac…"
+        } else if !isAvailable {
+            "Unavailable"
+        } else {
+            workspace.isOpen ? "Open on Mac" : "Closed on Mac"
+        }
+        let action = workspace.isOpen ? "Close" : "Open"
+
+        return HStack(spacing: 8) {
+            Button {
+                showingWorkspaceChoices = false
+                onSelectWorkspace(workspace.workspaceID)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: workspace.isOpen ? "folder.fill" : "folder")
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(workspace.name).font(.subheadline.weight(.medium)).lineLimit(1)
+                        Text(status).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if isSelected {
+                        Image(systemName: "checkmark")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.remoteWarmOrange)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!isAvailable)
+            .accessibilityLabel(workspace.name)
+            .accessibilityValue(status)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            if isAvailable, workspace.supportsPresentationControl == true, let workspaceID {
+                Button {
+                    workspacePickerError = nil
+                    Task {
+                        do {
+                            try await model.setWorkspacePresentation(.init(workspaceID: workspaceID, isOpen: !workspace.isOpen))
+                        } catch is CancellationError {
+                        } catch {
+                            workspacePickerError = error.localizedDescription
+                        }
+                    }
+                } label: {
+                    Group {
+                        if pending != nil {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text(action).font(.caption.weight(.semibold))
+                        }
+                    }
+                    .frame(minWidth: 54, minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.remoteWarmOrange)
+                .disabled(!model.canControlChat || model.pendingWorkspacePresentation != nil)
+                .accessibilityLabel("\(action) \(workspace.name) on the Mac")
+            }
+        }
+        .padding(.horizontal, 14)
     }
 
     private var connectionFooter: some View {
